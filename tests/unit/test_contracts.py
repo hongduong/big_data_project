@@ -18,6 +18,7 @@ from stocklake.contracts import (
     table_path,
     to_markdown,
 )
+from stocklake.contracts.schemas import RAW_INTRADAY_HISTORY
 
 UTC = timezone.utc
 
@@ -28,6 +29,7 @@ PLAN_TABLES = {
         "foreign_flow",
         "company_profile",
         "macro_daily",
+        "intraday_history",
         "intraday_prices",
         "market_news",
     },
@@ -72,6 +74,21 @@ def test_raw_has_metadata(schema):
     assert cols["source"].type == "string" and not cols["source"].nullable
     assert cols["ingest_ts"].type == "timestamp" and not cols["ingest_ts"].nullable
     assert cols["available_at"].type == "timestamp" and not cols["available_at"].nullable
+
+
+def test_raw_intraday_history():
+    s = get_schema("raw", "intraday_history")
+    assert s is RAW_INTRADAY_HISTORY
+    assert s.column_names == (
+        "symbol", "bar_ts", "open", "high", "low", "close", "volume",
+        "source", "ingest_ts", "available_at", "ingest_run_id",
+    )  # fmt: skip
+    assert all(not c.nullable for c in s.columns)
+    assert s.primary_key == ("symbol", "bar_ts", "source")
+    assert s.partition_by == ("source", "year") and s.derived_partitions == ("year",)
+    assert not {"produced_ts", "replay_run_id"} & set(s.column_names)
+    assert not [n for n in s.column_names if n.startswith("kafka_") or n == "spark_batch_ts"]
+    assert table_path("raw", "intraday_history") == "/data/raw/intraday_history"
 
 
 def test_schema_validation_errors():

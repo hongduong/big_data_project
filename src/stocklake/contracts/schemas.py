@@ -180,6 +180,23 @@ _KAFKA_COLS = (
     _c("spark_batch_ts", "timestamp"),
 )
 
+RAW_INTRADAY_HISTORY = TableSchema(
+    name="intraday_history",
+    layer="raw",
+    columns=(
+        _c("symbol", "string"),
+        _c("bar_ts", "timestamp", description="Giờ mở nến (UTC)"),
+        *_OHLC,
+        _c("volume", "long"),
+        *_META_RAW,
+        _c("ingest_run_id", "string", description="Id lượt chạy collector đã ghi dòng này"),
+    ),
+    primary_key=("symbol", "bar_ts", "source"),
+    partition_by=("source", "year"),
+    derived_partitions=("year",),
+    description="Lịch sử nến 1 phút tải batch bởi collector (không qua Kafka); year theo giờ VN",
+)
+
 RAW_INTRADAY_PRICES = TableSchema(
     name="intraday_prices",
     layer="raw",
@@ -413,6 +430,7 @@ ALL_SCHEMAS: tuple[TableSchema, ...] = (
     RAW_FOREIGN_FLOW,
     RAW_COMPANY_PROFILE,
     RAW_MACRO_DAILY,
+    RAW_INTRADAY_HISTORY,
     RAW_INTRADAY_PRICES,
     RAW_MARKET_NEWS,
     CLEAN_DAILY_OHLCV,
