@@ -12,6 +12,14 @@ PYTHON      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 SPARK_IMAGE ?= stocklake/spark:dev
 W           ?= 3
 PYTEST_ARGS ?=
+# Lát 1 sample pipeline (e2e-sample and its steps).
+INGEST_ARGS  ?=
+REPLAY_DAYS  ?= 5
+REPLAY_RATE  ?= 2000
+REPLAY_ARGS  ?=
+STREAM_ARGS  ?=
+SPARK_SUBMIT := docker exec spark-driver spark-submit
+JOBS_DIR     := /opt/stocklake/jobs
 
 # Containers expected by `make health` (workers are added below).
 CORE_CONTAINERS := kafka namenode datanode1 datanode2 datanode3 spark-master spark-driver collector dashboard
@@ -25,7 +33,8 @@ else
 EXPECT_WORKERS :=
 endif
 
-.PHONY: help build up down health topics smoke-kafka smoke-spark test lint docs stats clean-all
+.PHONY: help build up down health topics smoke-kafka smoke-spark test lint docs stats clean-all \
+        ingest-daily replay stream-intraday-once verify-replay etl-clean e2e-sample
 
 help:
 	@echo "Targets:"
@@ -40,6 +49,12 @@ help:
 	@echo "  lint               ruff check"
 	@echo "  docs               regenerate docs/data_dictionary.md"
 	@echo "  stats              docker stats --no-stream for project containers"
+	@echo "  ingest-daily       daily bars (sample symbols, ~1 year) -> /data/raw/daily_ohlcv [INGEST_ARGS=]"
+	@echo "  replay             replay REPLAY_DAYS days of 1-minute bars to Kafka at REPLAY_RATE msg/s"
+	@echo "  stream-intraday-once   Kafka intraday_prices -> /data/raw/intraday_prices (availableNow)"
+	@echo "  verify-replay RUN_ID=.. EXPECTED=..   distinct raw records of a replay run == sent"
+	@echo "  etl-clean          raw -> clean for daily and intraday bars"
+	@echo "  e2e-sample         whole Lát 1 sample pipeline in order; fails if any step fails"
 	@echo "  clean-all CONFIRM=yes   down + DELETE ALL VOLUMES (HDFS, Kafka, collector state)"
 
 build:
@@ -189,6 +204,59 @@ stats:
 	@ids="$$(docker ps -q --filter label=com.docker.compose.project=$(PROJECT))"; \
 	if [ -z "$$ids" ]; then echo "no running $(PROJECT) containers"; exit 0; fi; \
 	docker stats --no-stream $$ids
+
+# ---------------------------------------------------------------- Lát 1: sample pipeline
+# Jobs print one JSON line on stdout; logs go to stderr. Spark jobs: the long spark-submit
+# output is shown only on failure, otherwise just the job's JSON line.
+define spark_job
+out="$$($(SPARK_SUBMIT) $(1) 2>&1)" || { echo "$$out" | tail -60; echo "FAIL: spark-submit $(1)"; exit 1; }; \
+grep -E '^\{"' <<<"$$out"
+endef
+
+ingest-daily:
+	@echo "== daily OHLCV -> raw (collector)"
+	@docker exec collector python $(JOBS_DIR)/ingest/daily_ohlcv.py $(INGEST_ARGS)
+
+# Banner on stderr: e2e-sample reads the replay JSON line from stdout.
+replay:
+	@echo "== replay $(REPLAY_DAYS) days at $(REPLAY_RATE) msg/s -> Kafka intraday_prices (collector)" >&2
+	@docker exec collector python $(JOBS_DIR)/streaming/replay.py \
+	  --days $(REPLAY_DAYS) --rate $(REPLAY_RATE) $(REPLAY_ARGS)
+
+stream-intraday-once:
+	@echo "== Kafka intraday_prices -> raw (availableNow, checkpoint on HDFS)"
+	@$(call spark_job,$(JOBS_DIR)/streaming/intraday_to_raw.py --available-now $(STREAM_ARGS))
+
+verify-replay:
+	@if [ -z "$(RUN_ID)" ] || [ -z "$(EXPECTED)" ]; then \
+	  echo "usage: make verify-replay RUN_ID=<id> EXPECTED=<sent>"; exit 2; fi
+	@echo "== verify replay $(RUN_ID): $(EXPECTED) sent == distinct records in raw"
+	@$(call spark_job,$(JOBS_DIR)/streaming/verify_replay.py --run-id $(RUN_ID) --expected $(EXPECTED))
+
+etl-clean:
+	@echo "== daily raw -> clean"
+	@$(call spark_job,$(JOBS_DIR)/etl/daily_raw_to_clean.py)
+	@echo "== intraday raw -> clean"
+	@$(call spark_job,$(JOBS_DIR)/etl/intraday_raw_to_clean.py)
+
+# Order: daily ingest, replay (run_id + sent from its JSON line), stream once, verify, clean,
+# then the Parquet listing. Any failing step stops the recipe with a non-zero exit.
+e2e-sample:
+	@$(MAKE) --no-print-directory ingest-daily
+	@line="$$($(MAKE) --no-print-directory replay | tail -1)"; \
+	echo "$$line"; \
+	run_id="$$(sed -n 's/.*"run_id":"\([^"]*\)".*/\1/p' <<<"$$line")"; \
+	sent="$$(sed -n 's/.*"sent":\([0-9]*\).*/\1/p' <<<"$$line")"; \
+	if [ -z "$$run_id" ] || [ -z "$$sent" ]; then echo "FAIL: no run_id/sent in replay output"; exit 1; fi; \
+	$(MAKE) --no-print-directory stream-intraday-once; \
+	$(MAKE) --no-print-directory verify-replay RUN_ID="$$run_id" EXPECTED="$$sent"
+	@$(MAKE) --no-print-directory etl-clean
+	@echo "== Parquet files in /data/raw and /data/clean"
+	@docker exec namenode hdfs dfs -ls -R /data/raw /data/clean | grep -E '\.parquet$$'
+	@echo "== per table: DIR_COUNT FILE_COUNT CONTENT_SIZE PATH"
+	@docker exec namenode hdfs dfs -count /data/raw/daily_ohlcv /data/raw/intraday_prices \
+	  /data/clean/daily_ohlcv /data/clean/intraday_1m
+	@echo "E2E-SAMPLE: OK"
 
 clean-all:
 	@if [ "$(CONFIRM)" != "yes" ]; then \
