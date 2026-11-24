@@ -7,6 +7,8 @@ Quyết định:
   3 streaming replay có replay_run_id. Hoà trong cùng mức: `kafka_ts` mới nhất (chỉ
   streaming), rồi `ingest_ts` mới nhất, rồi tên nguồn.
 - Streaming source = "replay" không có replay_run_id (bản tin thử) bị loại và đếm riêng.
+- Cột `source` của clean = nguồn của dòng được chọn (chữ thường, bỏ khoảng trắng): history
+  -> nguồn của file (vd "vci"), streaming nguồn thật -> tên nguồn, replay có run id -> "replay".
 - `dates` chỉ chọn tháng cần xử lý: clean phân vùng (year, month) và ghi đè cả phân vùng,
   nên mỗi tháng phải dựng lại từ TOÀN BỘ raw của CẢ HAI bảng (xem `run_intraday_raw_to_clean`).
 """
@@ -137,6 +139,7 @@ def _dedupe(combined: DataFrame) -> DataFrame:
         F.col("source").asc_nulls_last(),
     )
     best = df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
+    best = best.withColumn("source", F.lower(F.trim(F.col("source"))))
     best = best.withColumn("trade_date", vn_date(F.col("bar_ts")))
     return best.withColumn("year", F.year("trade_date")).withColumn("month", F.month("trade_date"))
 
@@ -146,7 +149,8 @@ def clean_intraday(
 ) -> DataFrame:
     """Raw -> clean: hợp nhất history + streaming, khử trùng theo (symbol, bar_ts).
 
-    Trả đúng các cột contract clean.intraday_1m rồi tới `year`, `month`.
+    Trả đúng các cột contract clean.intraday_1m (gồm `source` của dòng được chọn) rồi tới
+    `year`, `month`.
     Loại streaming source = "replay" không có replay_run_id (bản tin thử, không phải dữ liệu).
     """
     return select_contract(_dedupe(_combine(stream_df, history_df)), CLEAN)
@@ -233,6 +237,7 @@ def run_intraday_raw_to_clean(
         "rejected": 0,
         "dropped_untagged_replay": 0,
         "partitions": 0,
+        "clean_by_source": {},
     }
     stream = read_raw_intraday(spark, dates)
     history = read_raw_history(spark, months)
@@ -268,6 +273,9 @@ def run_intraday_raw_to_clean(
         result["clean_from_stream_real"] = by_prio.get(PRIO_STREAM_REAL, 0)
         result["clean_from_replay"] = by_prio.get(PRIO_STREAM_REPLAY, 0)
         result["clean_rows"] = sum(by_prio.values())
+        result["clean_by_source"] = {
+            r["source"]: r["count"] for r in best.groupBy("source").count().collect()
+        }
         if result["clean_rows"]:
             clean = select_contract(best, CLEAN)
             part = CLEAN.partition_by

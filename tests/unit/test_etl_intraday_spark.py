@@ -108,10 +108,12 @@ def test_output_matches_contract(spark):
     df = clean(spark, [raw_row()])
     expected = to_spark(CLEAN)
     assert df.columns == [*CLEAN.column_names, *CLEAN.derived_partitions]
+    assert "source" in df.columns
     for f in expected.fields:
         assert df.schema[f.name].dataType == f.dataType, f.name
     row = df.collect()[0]
     assert (row["year"], row["month"]) == (2026, 1)
+    assert row["source"] == "vci"
 
 
 def test_real_source_beats_replay_even_if_older(spark):
@@ -211,9 +213,11 @@ def test_history_beats_stream_real_beats_tagged_replay(spark):
         raw_row(bar=bar, source="kbs", c=2.0, kafka=40),
     ]
     out = clean(spark, stream, [hist_row(bar=bar, source="vci", c=1.0)]).collect()
-    assert len(out) == 1 and out[0]["close"] == 1.0
+    assert len(out) == 1 and (out[0]["close"], out[0]["source"]) == (1.0, "vci")
     out = clean(spark, stream).collect()
-    assert len(out) == 1 and out[0]["close"] == 2.0
+    assert len(out) == 1 and (out[0]["close"], out[0]["source"]) == (2.0, "kbs")
+    out = clean(spark, stream[:1]).collect()
+    assert len(out) == 1 and (out[0]["close"], out[0]["source"]) == (3.0, "replay")
 
 
 def test_history_vci_beats_other_history(spark):
@@ -223,7 +227,23 @@ def test_history_vci_beats_other_history(spark):
         hist_row(bar=bar, source="vci", c=1.0, ingest=1),
     ]
     out = clean(spark, None, hist).collect()
-    assert len(out) == 1 and out[0]["close"] == 1.0
+    assert len(out) == 1 and (out[0]["close"], out[0]["source"]) == (1.0, "vci")
+    # Chỉ có history khác VCI: source là nguồn của file đó.
+    out = clean(spark, None, hist[:1]).collect()
+    assert (out[0]["close"], out[0]["source"]) == (2.0, "vndirect")
+
+
+def test_source_is_chosen_row_source_normalised(spark):
+    b1, b2, b3 = (utc(2026, 1, 5, 3, m) for m in (20, 21, 22))
+    stream = [
+        raw_row("FPT", b1, source="KBS", c=1.0),  # nguồn thật viết hoa
+        raw_row("FPT", b2, source="replay", run_id="r-9", c=2.0),
+        raw_row("FPT", b3, source="replay", run_id="r-9", c=3.0),
+    ]
+    hist = [hist_row("FPT", bar=b3, source="vci", c=4.0)]
+    out = {r["close"]: r["source"] for r in clean(spark, stream, hist).collect()}
+    # b3: history vci thắng replay; b1: nguồn thật ghi chữ thường; b2: replay có run id.
+    assert out == {1.0: "kbs", 2.0: "replay", 4.0: "vci"}
 
 
 def test_history_only_and_stream_only(spark):
@@ -268,3 +288,4 @@ def test_output_matches_contract_with_history(spark):
     assert df.columns == [*CLEAN.column_names, *CLEAN.derived_partitions]
     for f in expected.fields:
         assert df.schema[f.name].dataType == f.dataType, f.name
+    assert {r["symbol"]: r["source"] for r in df.collect()} == {"FPT": "vci", "VNM": "vci"}
