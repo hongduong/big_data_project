@@ -69,7 +69,7 @@ Ngày 05/01/2015, FPT: VCI trả 6.489,7 đồng; VNDirect trả `adClose` 6,49 
 | Batch — khối ngoại | Theo mã và toàn sàn từ 30/08/2018 (VNDirect). Riêng VNINDEX và rổ VN30 lấy thêm 2015–2018 từ CafeF | ~0,9 triệu dòng |
 | Batch — hồ sơ | Danh sách mã, sàn, ngành, ngày niêm yết (VCI, VNDirect) | ~1.500 dòng |
 | Batch — vĩ mô | US 10Y, DXY, Brent, S&P 500, VIX, USD/VND từ 2015 (yfinance; FRED để đối chiếu) | ~18.000 dòng |
-| Streaming — giá phút | Topic `intraday_prices`. Lịch sử 1 phút từ 09/2023 (VCI) phát lại qua Replay Simulator; trong giờ giao dịch có collector lấy nến phút mới | Tải theo 2 đợt: **đợt 1 rổ VN30** (~5 triệu dòng, ~200 request) là mức tối thiểu; **đợt 2 phần còn lại của 412 mã** (tổng ~60–70 triệu dòng) chỉ chạy khi đợt 1 ổn |
+| Streaming — giá phút | Topic `intraday_prices`. Lịch sử 1 phút từ 09/2023 (VCI) tải batch vào `raw/intraday_history`, Replay Simulator đọc bảng này và phát lại từng phần qua Kafka; trong giờ giao dịch có collector lấy nến phút mới | Tải theo 2 đợt: **đợt 1 rổ VN30** (~5 triệu dòng, ~200 request) là mức tối thiểu; **đợt 2 phần còn lại của 412 mã** (tổng ~60–70 triệu dòng) chỉ chạy khi đợt 1 ổn |
 | Streaming — tin tức | Topic `market_news` từ 3 RSS. Chỉ thu và lưu, không phân tích nội dung | vài trăm tin/ngày |
 | Chất lượng dữ liệu | 5 nhóm: Completeness, Uniqueness, Validity, bước nhảy giá bất thường, đối chiếu chéo VCI ↔ VNDirect | — |
 | Phân tích | Spark SQL (toàn sàn, độ rộng, thanh khoản, khối ngoại); Logistic Regression T+5 + leakage test; Streamlit | — |
@@ -100,7 +100,7 @@ flowchart LR
     A4[RSS x3]
   end
   subgraph Collector[Collector container]
-    B1[Batch collectors]
+    B1[Batch collectors<br/>gồm lịch sử nến phút]
     B2[Intraday producer]
     B3[Replay simulator]
     B4[RSS producer]
@@ -122,7 +122,8 @@ flowchart LR
   A1 & A2 & A3 --> B1
   A1 --> B2
   A4 --> B4
-  B1 -->|Parquet qua WebHDFS| H1
+  B1 -->|Parquet qua WebHDFS, gồm raw/intraday_history| H1
+  H1 -->|WebHDFS: đọc intraday_history| B3
   B2 & B3 & B4 --> K --> S1 --> H1
   S1 -.-> H4
   H1 --> S2 --> H2 --> S3
@@ -180,8 +181,26 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **24,5GB / 14 vCPU** (spar
 - Chia core trên master: streaming 2 core (1 executor, worker3); `daily_raw_to_clean` lấy 4 core còn lại (worker1, worker2); `intraday_raw_to_clean` ở trạng thái WAITING khoảng 35 giây cho tới khi job daily xong rồi mới nhận 4 core. Hai job batch không chạy song song với nhau vì job batch không đặt `spark.cores.max`.
 - Host `available` thấp nhất 18.713MB. Không container nào bị OOM kill hay khởi động lại; log worker/master không có executor bị mất.
 - Đánh giá: worker còn dư nhiều (đỉnh < 1GB / 4GB với dữ liệu mẫu). Driver là chỗ chật: mỗi spark-submit là một JVM `-Xmx1400m` trong cùng container 2GB và 1 CPU; ba driver cùng lúc đã lên 1,56GB và dùng hết 1 CPU (batch đầu tiên của streaming mất 23 giây cho 11.259 dòng). Không nên chạy quá 3 driver cùng lúc trong `spark-driver`.
-- **Sau số đo này** container `spark-driver` được nâng lên 3GB / 2 CPU. Các số ở bảng trên đo với giới hạn cũ 2GB / 1 CPU; chưa đo lại 3 driver cùng lúc với giới hạn mới.
+- **Sau số đo này** container `spark-driver` được nâng lên 3GB / 2 CPU. Các số ở bảng trên đo với giới hạn cũ 2GB / 1 CPU; số đo lại với giới hạn mới ở bảng Lát 2 ngay dưới.
 - Latency đầu-cuối của lần phát lại này (commit của batch − `produced_ts`): p50 28,1 giây, p95 30,7 giây; gồm thời gian chờ trigger 10 giây và batch 23 giây khi tranh CPU với hai job batch.
+
+**Số đo Lát 2: 3 driver cùng lúc với giới hạn mới (24/11/2026, driver 3GB / 2 CPU, dữ liệu VN30 thật, 3 worker).** Job streaming `intraday_to_raw` (processingTime 10 giây, `spark.cores.max=2`) chạy liên tục; cùng lúc phát lại 130.269 bản tin VN30 (20 ngày, 2.000 msg/giây), gửi `intraday_raw_to_clean` (đọc ~5,0 triệu dòng raw, ghi 4,83 triệu dòng clean) rồi `daily_raw_to_clean`. Chạy 2 lần; số dưới là lần 2 (lần 1: driver đỉnh 1.650MiB, worker đỉnh 2.380 / 1.726 / 1.839MiB, host `available` thấp nhất 15.021MB; xem ghi chú cuối). `docker stats` khoảng 7 giây một lần (24 mẫu / 163 giây).
+
+| Container | Giới hạn | Trung vị | Đỉnh | CPU đỉnh |
+|---|---|---|---|---|
+| Spark Worker 1 / 2 / 3 | 4GB mỗi worker | 319 / 313 / 1.349MiB | 2.121 / 1.938 / 1.464MiB (≤ 53%) | 203% / 206% / 199% |
+| Spark driver (3 driver cùng lúc) | 3GB | 697MiB | 1.704MiB (55%) | 209% |
+| Kafka | 2GB | 922MiB | 924MiB | 16% |
+| NameNode | 1,5GB | 581MiB | 589MiB | 72% |
+| DataNode 1 / 2 / 3 | 1GB mỗi node | 446 / 448 / 434MiB | 450 / 454 / 440MiB | ≤ 14% |
+| Spark Master | 1GB | 305MiB | 308MiB | 18% |
+| Collector (đang replay) | 1GB | 317MiB | 442MiB | 52% |
+| Streamlit | 1GB | 227MiB | 237MiB | 19% |
+
+- JSON của master xác nhận 3 app cùng lúc: streaming 2 core (worker3), `intraday_raw_to_clean` 4 core (worker1, 2), `daily_raw_to_clean` WAITING ~35 giây rồi mới nhận 4 core (job batch vẫn không đặt `spark.cores.max`, như Lát 1).
+- Host `available` thấp nhất 14.844MB. Không container nào bị OOM kill hay khởi động lại. Driver đạt 2 CPU (đúng trần) nhưng RAM còn dư 45%; worker với job ~5 triệu dòng mới tới ~2,1GB / 4GB, chưa chạm trần.
+- Latency đầu-cuối của lần phát lại này: p50 7,2 giây, p95 16,9 giây (lần 1: 7,2 / 17,8 giây); batch đầu 13,8 giây (khởi động executor), các batch sau 0,7–2,2 giây. Replay đạt ~1.450 msg/giây thay vì 2.000 vì collector (0,5 CPU) vừa đọc WebHDFS vừa gửi.
+- Lần 1 chạy `intraday_dq` thay `daily_raw_to_clean` và job DQ **lỗi** `FileNotFoundException` vì đọc `clean/intraday_1m` đúng lúc `intraday_raw_to_clean` ghi đè phân vùng: không chạy DQ (hay job đọc `clean`) song song với job ghi lại chính bảng đó.
 - Job streaming đặt `spark.cores.max=2` để không chiếm hết executor của job batch.
 - Khi chạy benchmark scale-out và storage thì dừng job streaming.
 - Dùng Compose `profiles` (`w1`, `w2`, `w3`) để bật 1, 2, 3 worker.
@@ -268,9 +287,9 @@ big_data_project/
 │   │   └── vci, vndirect, kbs, cafef, yahoo, fred, rss
 │   ├── ingestion/              # Hồng Dương
 │   │   ├── framework/          #   base collector, fallback, state idempotent
-│   │   └── collectors/         #   collector batch: nến ngày, khối ngoại, hồ sơ, vĩ mô
+│   │   └── collectors/         #   collector batch: nến ngày, khối ngoại, hồ sơ, vĩ mô, lịch sử nến phút
 │   ├── streaming/              # Tuyền
-│   │   ├── producers/          #   intraday, rss, replay (gọi nguồn qua sources)
+│   │   ├── producers/          #   intraday, rss (gọi nguồn qua sources), replay (đọc raw/intraday_history)
 │   │   └── sinks/              #   Kafka → raw
 │   ├── etl/                    # Hùng Dương
 │   │   ├── raw_to_clean/
@@ -409,10 +428,11 @@ Khoá khử trùng: `news_id`.
 | `foreign_flow` | `symbol`, `trade_date`, `source` | `buy_vol`, `sell_vol`, `net_vol` (long), `buy_val`, `sell_val`, `net_val` (double), `room_left` (double, null) | `source`, `year` |
 | `company_profile` | `symbol`, `snapshot_date` | `exchange`, `company_name`, `icb_code`, `listed_date` | `snapshot_date` |
 | `macro_daily` | `series_id`, `obs_date`, `source` | `value` (double) | `source` |
+| `intraday_history` | `symbol`, `bar_ts`, `source` | `open`, `high`, `low`, `close` (double, đồng), `volume` (long), `ingest_run_id` (string, lượt chạy collector); không có cột Kafka và cột replay | `source`, `year` (năm theo giờ VN của `bar_ts`); file `source=<s>/year=<YYYY>/<SYMBOL>.parquet` |
 | `intraday_prices` | như topic | như topic + `kafka_partition`, `kafka_offset`, `kafka_ts`, `spark_batch_ts` | `trade_date` |
 | `market_news` | như topic | như topic + cột Kafka | `ingest_date` |
 
-Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `symbol` hoặc `series`, khoảng ngày). Chạy lại thì ghi đè đúng file đó, nên không tạo trùng.
+Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `symbol` hoặc `series`, khoảng ngày; riêng `intraday_history` theo `symbol`, `year`). Chạy lại thì ghi đè đúng file đó, nên không tạo trùng. `intraday_history` nằm riêng với `intraday_prices`: bảng trước do collector ghi thẳng, bảng sau do Spark Structured Streaming ghi từ Kafka.
 
 ### 4.4 Lớp `clean` (`/data/clean/...`)
 
@@ -422,7 +442,7 @@ Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `sym
 | `foreign_flow` | `symbol`, `trade_date` | như raw, đã chuẩn hoá kiểu | `year` |
 | `company_profile` | `symbol` | bản mới nhất | không |
 | `macro_daily` | `series_id`, `obs_date` | `value`, `available_at` | không |
-| `intraday_1m` | `symbol`, `bar_ts` | OHLCV, `trade_date`, `available_at` | `year`, `month` (sắp xếp theo `symbol`) |
+| `intraday_1m` | `symbol`, `bar_ts` | OHLCV, `trade_date`, `available_at`. Hợp của `raw/intraday_history` và `raw/intraday_prices`; khi trùng khoá chọn theo ưu tiên: history (vci) > streaming từ nguồn thật > replay có run id; dòng replay không có run id bị loại | `year`, `month` (sắp xếp theo `symbol`) |
 | `market_news` | `news_id` | như raw, đã khử trùng | `year`, `month` |
 | `trading_calendar` | `trade_date` | `is_trading_day` (suy ra từ VNINDEX) | không |
 
@@ -445,7 +465,7 @@ Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `sym
 - `partitionBy("year", "symbol")` với 412 mã × 12 năm tạo khoảng 4.900 thư mục, mỗi file chỉ vài chục KB. NameNode tốn bộ nhớ cho từng file và Spark tốn thời gian liệt kê. Với 1.600 mã con số là ~19.000.
 - **Chọn:** nến ngày phân vùng theo `year`, sắp xếp theo `symbol` trong file để tận dụng thống kê row group của Parquet. Nến phút phân vùng theo `year`, `month`.
 - Phương án `year`/`symbol` vẫn được dựng trong bài đo storage làm đối chứng.
-- **Compaction:** Structured Streaming ghi danh sách file vào `_spark_metadata`, nên không gom file tại thư mục streaming đang ghi. `raw` do streaming ghi; job batch đọc `raw`, ghi sang `clean` đã gom file. Bài đo trước/sau compaction so `raw` với `clean`.
+- **Compaction:** Structured Streaming ghi danh sách file vào `_spark_metadata`, nên không gom file tại thư mục streaming đang ghi. `raw` do streaming ghi (riêng `intraday_history` do collector ghi theo file symbol-năm); job batch đọc `raw`, ghi sang `clean` đã gom file. Bài đo trước/sau compaction so `raw` với `clean`.
 
 ### (b) Đo end-to-end latency
 
@@ -525,11 +545,13 @@ Dữ liệu mẫu: 10 mã, 1 năm nến ngày, 5 ngày nến phút.
 | Việc | Vùng |
 |---|---|
 | Client còn lại trong `sources` (KBS, CafeF, yfinance, FRED); tải toàn bộ: nến ngày 412 mã, khối ngoại, hồ sơ, vĩ mô | Hồng Dương |
-| Tải lịch sử nến phút từ 09/2023 và phát lại qua Kafka | Tuyền |
+| Tải lịch sử nến phút từ 09/2023 vào `raw/intraday_history` (2 đợt, VN30 trước) | Hồng Dương |
+| Phát lại từ `raw/intraday_history` qua Kafka | Tuyền |
 | Client RSS trong `sources` | Hồng Dương |
 | RSS producer + job streaming tin tức | Tuyền |
 | `raw` → `clean` đầy đủ, job compaction, lịch chạy | Hùng Dương |
-| DQ engine 5 nhóm, ghi `curated/dq_report` | Hồng Dương |
+| `clean/intraday_1m` = hợp `raw/intraday_history` và `raw/intraday_prices` theo thứ tự ưu tiên mục 4.4 | Hùng Dương |
+| DQ engine 5 nhóm, ghi `curated/dq_report`; thêm kiểm tra nến phút: đủ số nến theo (`symbol`, ngày) so với lịch giao dịch suy ra từ VNINDEX, và tổng volume phút so với volume nến ngày | Hồng Dương |
 | Bảng `market_daily`, `symbol_daily_features` | Thanh |
 
 **Xong khi:**
@@ -601,10 +623,14 @@ Nhánh `main` giữ nguyên, không nhận file nào từ bước này.
 1. **Phân vùng sở hữu:** giữ nguyên bảng mục 3.1. Đây là phân vai để chia commit và trình bày, không phải phân công việc thật.
 2. **Truy cập PC:** SSH qua Tailscale bằng user `dave` đã chạy được. `dave` thuộc nhóm `docker`; riêng `sudo -n /usr/local/sbin/drop-caches` chạy không cần mật khẩu, các lệnh sudo khác vẫn cần.
 3. **Nến phút tải theo 2 đợt:**
-   - Đợt 1: rổ VN30 từ 09/2023, lưu vào `raw` trước.
+   - Đợt 1: rổ VN30 từ 09/2023, lưu vào bảng `raw/intraday_history` trước.
    - Đợt 2: phần còn lại của 412 mã, chỉ chạy khi đợt 1 không bị chặn. Giới hạn 1 request/giây, chạy ngoài giờ giao dịch.
    - Collector ghi lại mã đã tải xong để chạy tiếp được khi bị ngắt. Gặp mã lỗi 429 hoặc 403 thì dừng, chờ rồi thử lại sau.
    - Nếu đợt 2 không hoàn tất, bài đo scale-out dùng dữ liệu VN30 nhân bản và báo cáo ghi rõ hệ số nhân.
 4. **Cấu trúc repo:** theo sơ đồ `repo_structure.html` — một package `src/stocklake/`, thư mục `jobs/` mỏng, `docker/` và `conf/` tách riêng. Hai điều chỉnh sau khi rà lại:
    - Tách `src/stocklake/sources/` thành module riêng (chủ: Hồng Dương). Lý do: producer giá phút của `streaming` cũng phải gọi VCI, mà `streaming` không được import `ingestion`; `rss` trước đó nằm ở cả hai nơi.
    - Schema trong `contracts` khai báo dạng trung lập bằng Python thuần, có hàm chuyển sang Spark và pyarrow; `pyproject.toml` chia nhóm phụ thuộc `spark`, `collector`, `dashboard`, `dev`. Lý do: collector và dashboard không phải cài pyspark.
+5. **Lịch sử nến phút không đi qua Kafka (24/11/2026):** collector trong `ingestion` (chủ: Hồng Dương) tải batch thẳng vào bảng HDFS `raw/intraday_history`. Kafka → Spark Structured Streaming chỉ mang (a) các tập con phát lại do Replay Simulator tạo, nay đọc `raw/intraday_history` qua WebHDFS, và (b) nến phút trực tiếp trong giờ giao dịch.
+   - `clean/intraday_1m` là hợp của `raw/intraday_history` và `raw/intraday_prices`, khoá (`symbol`, `bar_ts`). Ưu tiên: history (vci) > streaming từ nguồn thật > replay có run id; dòng replay không có run id bị loại.
+   - Lý do 1: cache JSONL trên volume của collector nằm ngoài HDFS, Spark không đọc được.
+   - Lý do 2: đẩy ~70 triệu bản tin qua Kafka mất ~10 giờ ở 2.000 msg/giây, và mỗi micro-batch trải ~800 ngày giao dịch, sinh hàng trăm nghìn file nhỏ.
