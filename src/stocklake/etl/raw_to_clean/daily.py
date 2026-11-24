@@ -6,6 +6,8 @@ Quyết định:
 - Dòng bị loại (đếm vào `rejected`): thiếu khoá/giá/khối lượng/available_at, hoặc `price_unit`
   lạ. Dòng sai logic giá (high < low...) được giữ và gắn cờ trong `dq_flags`.
 - Chọn nguồn: vci > vndirect > khác; cùng nguồn lấy `ingest_ts` mới nhất.
+- Lệnh ghi giữ khoá ghi `clean.daily_ohlcv` (reader như dq/dashboard giữ khoá đọc). Bảng nhỏ nên
+  luôn dựng lại các năm được chọn, không chạy tăng dần.
 """
 
 from __future__ import annotations
@@ -14,7 +16,9 @@ from typing import TYPE_CHECKING, Any
 
 from stocklake.common.logging import get_logger
 from stocklake.contracts import get_schema, table_path
+from stocklake.contracts.paths import DATA_BASE
 from stocklake.etl.raw_to_clean._common import (
+    clean_write_lock,
     conform,
     is_empty_input_error,
     path_exists,
@@ -96,11 +100,13 @@ def clean_daily_ohlcv(raw_df: DataFrame) -> DataFrame:
     return select_contract(best, CLEAN)
 
 
-def read_raw_daily(spark: SparkSession, years: list[int] | None = None) -> DataFrame | None:
+def read_raw_daily(
+    spark: SparkSession, years: list[int] | None = None, *, base: str = DATA_BASE
+) -> DataFrame | None:
     """Đọc raw daily (mọi source); None nếu chưa có dữ liệu."""
     from pyspark.sql import functions as F
 
-    root = table_path("raw", RAW.name)
+    root = table_path("raw", RAW.name, base)
     if not path_exists(spark, root):
         return None
     try:
@@ -119,10 +125,20 @@ def read_raw_daily(spark: SparkSession, years: list[int] | None = None) -> DataF
     return df
 
 
-def run_daily_raw_to_clean(spark: SparkSession, years: list[int] | None = None) -> dict[str, Any]:
-    """Chạy job: đọc raw, ghi clean phân vùng theo year. Trả {raw_rows, clean_rows, ...}."""
-    raw = read_raw_daily(spark, years)
-    result = {"raw_rows": 0, "clean_rows": 0, "rejected": 0, "partitions": 0}
+def run_daily_raw_to_clean(
+    spark: SparkSession,
+    years: list[int] | None = None,
+    lock_fs: Any = None,
+    *,
+    base: str = DATA_BASE,
+) -> dict[str, Any]:
+    """Chạy job: đọc raw, ghi clean phân vùng theo year. Trả {raw_rows, clean_rows, ...}.
+
+    Thống kê tính trước, khoá ghi `clean.daily_ohlcv` chỉ giữ quanh lệnh ghi. `lock_fs`: None ->
+    khoá trên HDFS, False -> không khoá (test), hoặc một LockFs. Hết giờ chờ khoá -> TimeoutError.
+    """
+    raw = read_raw_daily(spark, years, base=base)
+    result = {"raw_rows": 0, "clean_rows": 0, "rejected": 0, "partitions": 0, "lock_waited_s": 0.0}
     if raw is None:
         log.warning("Chưa có raw daily_ohlcv")
         return result
@@ -138,7 +154,9 @@ def run_daily_raw_to_clean(spark: SparkSession, years: list[int] | None = None) 
             if result["clean_rows"]:
                 part = CLEAN.partition_by
                 result["partitions"] = clean.select(*part).distinct().count()
-                write_partitioned(spark, clean, table_path("clean", CLEAN.name), part)
+                with clean_write_lock(spark, CLEAN.name, lock_fs) as handle:
+                    result["lock_waited_s"] = round(float(handle.waited_s), 3)
+                    write_partitioned(spark, clean, table_path("clean", CLEAN.name, base), part)
         finally:
             clean.unpersist()
     finally:
