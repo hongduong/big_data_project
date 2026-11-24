@@ -24,6 +24,10 @@ HIST_GROUP   ?= sample
 SYMBOLS      ?=
 HIST_ARGS    ?=
 DQ_ARGS      ?=
+# Intraday clean (incremental by default): CLEAN_ARGS=--full or CLEAN_ARGS='--dates 2026-11-20'.
+CLEAN_ARGS   ?=
+# Regroup existing raw/intraday_history files into one row group per month (no VCI calls).
+REGROUP_ARGS ?=
 SPARK_SUBMIT := docker exec spark-driver spark-submit
 JOBS_DIR     := /opt/stocklake/jobs
 
@@ -40,8 +44,8 @@ EXPECT_WORKERS :=
 endif
 
 .PHONY: help build up down health topics smoke-kafka smoke-spark test lint docs stats clean-all \
-        ingest-daily ingest-intraday-history replay stream-intraday-once verify-replay etl-clean \
-        dq-intraday e2e-sample
+        ingest-daily ingest-intraday-history regroup-intraday-history replay stream-intraday-once \
+        verify-replay etl-clean dq-intraday e2e-sample
 
 help:
 	@echo "Targets:"
@@ -59,10 +63,13 @@ help:
 	@echo "  ingest-daily       daily bars (sample symbols, ~1 year) -> /data/raw/daily_ohlcv [INGEST_ARGS=]"
 	@echo "  ingest-intraday-history [HIST_GROUP=sample|vn30] [SYMBOLS=A,B] [HIST_ARGS=]"
 	@echo "                     1-minute history (VCI, 1 req/s, refuses trading hours) -> raw/intraday_history"
+	@echo "  regroup-intraday-history [REGROUP_ARGS=--dry-run|--symbols A,B|--years 2025]"
+	@echo "                     rewrite existing history files as one row group per VN month (no VCI)"
 	@echo "  replay [REPLAY_GROUP=sample|vn30]   replay REPLAY_DAYS days from raw/intraday_history to Kafka at REPLAY_RATE msg/s"
 	@echo "  stream-intraday-once   Kafka intraday_prices -> /data/raw/intraday_prices (availableNow)"
 	@echo "  verify-replay RUN_ID=.. EXPECTED=..   distinct raw records of a replay run == sent"
-	@echo "  etl-clean          raw -> clean for daily and intraday bars"
+	@echo "  etl-clean [CLEAN_ARGS=--full|'--dates D ...']   raw -> clean for daily and intraday bars"
+	@echo "                     (intraday is incremental: only months whose raw input changed)"
 	@echo "  dq-intraday [DQ_ARGS=]   intraday_1m checks (day coverage, minute vs daily volume)"
 	@echo "  e2e-sample         whole sample pipeline in order; fails if any step fails"
 	@echo "  clean-all CONFIRM=yes   down + DELETE ALL VOLUMES (HDFS, Kafka, collector state)"
@@ -233,6 +240,12 @@ ingest-intraday-history:
 	@docker exec collector python $(JOBS_DIR)/ingest/intraday_history.py \
 	  $(if $(SYMBOLS),--symbols $(SYMBOLS),--group $(HIST_GROUP)) $(HIST_ARGS)
 
+# Reads and rewrites raw/intraday_history over WebHDFS (no source calls). Each file is written to a
+# temp file and verified before it replaces the original; exit 1 if any file fails the check.
+regroup-intraday-history:
+	@echo "== regroup raw/intraday_history: one row group per VN month (collector, no VCI calls)"
+	@docker exec collector python $(JOBS_DIR)/ingest/regroup_intraday_history.py $(REGROUP_ARGS)
+
 # Reads raw/intraday_history over WebHDFS (no source calls). Banner on stderr: e2e-sample reads
 # the replay JSON line from stdout.
 replay:
@@ -253,8 +266,8 @@ verify-replay:
 etl-clean:
 	@echo "== daily raw -> clean"
 	@$(call spark_job,$(JOBS_DIR)/etl/daily_raw_to_clean.py)
-	@echo "== intraday raw -> clean"
-	@$(call spark_job,$(JOBS_DIR)/etl/intraday_raw_to_clean.py)
+	@echo "== intraday raw -> clean $(CLEAN_ARGS)"
+	@$(call spark_job,$(JOBS_DIR)/etl/intraday_raw_to_clean.py $(CLEAN_ARGS))
 
 # The job exits 0 whenever it ran; each check's pass/fail is inside its JSON line.
 dq-intraday:
