@@ -6,9 +6,10 @@ Các loader có cache import pandas/pyarrow bên trong hàm.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from stocklake.contracts import table_path
 
@@ -27,6 +28,9 @@ DAILY_PATH = table_path("clean", "daily_ohlcv")
 INTRADAY_PATH = table_path("clean", "intraday_1m")
 DAILY_COLUMNS = ["symbol", "trade_date", "open", "high", "low", "close", "raw_close", "volume"]
 INTRADAY_COLUMNS = ["symbol", "bar_ts", "open", "high", "low", "close", "volume", "trade_date"]
+RETRY_PAUSE_S = 1.5  # nghỉ trước lần đọc lại khi job clean đang thay file phân vùng
+
+T = TypeVar("T")
 
 # ------------------------------------------------------------ hàm thuần
 
@@ -98,6 +102,25 @@ def moving_average(values: Sequence[float | None], window: int = 20) -> list[flo
     return out
 
 
+def retry_once(
+    fn: Callable[[], T],
+    *,
+    pause_s: float = RETRY_PAUSE_S,
+    sleep: Callable[[float], None] = time.sleep,
+    retry_on: tuple[type[BaseException], ...] = (OSError,),
+) -> T:
+    """Gọi `fn`; nếu lỗi thuộc `retry_on` thì nghỉ `pause_s` giây rồi gọi lại ĐÚNG MỘT lần.
+
+    Lần hai lỗi thì lỗi lần hai được ném ra như bình thường; lỗi không thuộc `retry_on`
+    không được thử lại.
+    """
+    try:
+        return fn()
+    except retry_on:
+        sleep(pause_s)
+    return fn()
+
+
 def summary_line(rows: int, symbols: int, first: Any, last: Any) -> str:
     """Dòng tóm tắt số dòng / mã / khoảng ngày."""
     if not rows:
@@ -108,12 +131,30 @@ def summary_line(rows: int, symbols: int, first: Any, last: Any) -> str:
 # ------------------------------------------------------------ đọc dữ liệu
 
 
+def _retryable_errors() -> tuple[type[BaseException], ...]:
+    """Lỗi đọc có thể do job clean thay file giữa chừng: OSError (gồm FileNotFoundError,
+    ArrowIOError, lỗi kết nối WebHDFS) và ArrowInvalid (file Parquet dở dang)."""
+    try:
+        import pyarrow as pa
+
+        return (OSError, pa.ArrowInvalid)
+    except ImportError:  # pragma: no cover
+        return (OSError,)
+
+
 def _read(path: str, columns, filters):
-    """Gọi reader chung; thiếu đường dẫn -> None."""
+    """Gọi reader chung, thử lại một lần khi lỗi đọc; thiếu đường dẫn -> None.
+
+    Lỗi sau lần thử lại vẫn được ném ra (trang hiện st.error). `st.cache_data` không lưu kết
+    quả khi hàm ném lỗi, nên lỗi không bị nhớ; chỉ kết quả rỗng (None) bị cache 60 giây.
+    """
     from stocklake.common.hdfs import read_parquet_dir
 
     try:
-        table = read_parquet_dir(path, columns=columns, filters=filters)
+        table = retry_once(
+            lambda: read_parquet_dir(path, columns=columns, filters=filters),
+            retry_on=_retryable_errors(),
+        )
     except FileNotFoundError:
         return None
     if table is None or table.num_rows == 0:

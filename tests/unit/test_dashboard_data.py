@@ -68,6 +68,53 @@ def test_summary_line(d):
     assert "1,234 dòng" in d.summary_line(1234, 10, "2025-01-01", "2025-12-31")
 
 
+def test_retry_once_success_first_time(d):
+    calls, sleeps = [], []
+
+    def fn():
+        calls.append(1)
+        return "ok"
+
+    assert d.retry_once(fn, pause_s=1.5, sleep=sleeps.append, retry_on=(OSError,)) == "ok"
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_retry_once_fails_once_then_succeeds(d):
+    calls, sleeps = [], []
+
+    def fn():
+        calls.append(1)
+        if len(calls) == 1:
+            raise FileNotFoundError("part-0001.parquet")
+        return "ok"
+
+    assert d.retry_once(fn, pause_s=2.0, sleep=sleeps.append, retry_on=(OSError,)) == "ok"
+    assert len(calls) == 2 and sleeps == [2.0]
+
+
+def test_retry_once_fails_twice_raises_second_error(d):
+    sleeps, errors = [], [OSError("lần 1"), OSError("lần 2")]
+
+    def fn():
+        raise errors.pop(0)
+
+    with pytest.raises(OSError, match="lần 2"):
+        d.retry_once(fn, pause_s=1.0, sleep=sleeps.append, retry_on=(OSError,))
+    assert sleeps == [1.0] and errors == []
+
+
+def test_retry_once_does_not_retry_other_errors(d):
+    calls, sleeps = [], []
+
+    def fn():
+        calls.append(1)
+        raise KeyError("x")
+
+    with pytest.raises(KeyError):
+        d.retry_once(fn, pause_s=1.0, sleep=sleeps.append, retry_on=(OSError,))
+    assert len(calls) == 1 and sleeps == []
+
+
 def test_dashboard_imports_only_contracts_and_common():
     allowed = ("stocklake.contracts", "stocklake.common")
     for path in DASH.rglob("*.py"):
