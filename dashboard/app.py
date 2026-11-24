@@ -1,6 +1,7 @@
 """Khung Streamlit: cấu hình kết nối, kiểm tra HDFS, schema curated. Không import Spark."""
 
 import streamlit as st
+from data import summary_line, table_status, to_vn_time
 
 from stocklake.common import hdfs
 from stocklake.common.config import get_settings
@@ -21,6 +22,21 @@ st.json(
         "hdfs_user": settings.hdfs_user,
     }
 )
+
+st.header("Trạng thái dữ liệu (lớp clean)")
+for _kind, _label in (("daily", "Nến ngày clean"), ("intraday", "Nến phút clean")):
+    try:
+        _s = table_status(_kind)
+    except Exception as exc:  # HDFS chưa sẵn sàng hoặc thiếu thư viện
+        st.error(f"{_label}: không đọc được ({exc})")
+        continue
+    if not _s["rows"]:
+        st.info(f"{_label}: chưa có dữ liệu.")
+        continue
+    _first, _last = _s["first"], _s["last"]
+    if _kind == "intraday":  # bar_ts là UTC -> giờ Việt Nam
+        _first, _last = to_vn_time(_first), to_vn_time(_last)
+    st.write(f"**{_label}**: " + summary_line(_s["rows"], _s["symbols"], _first, _last))
 
 st.header("Kiểm tra HDFS")
 if st.button("Kiểm tra HDFS"):
@@ -51,5 +67,5 @@ st.dataframe(
         for s in ALL_SCHEMAS
         if s.layer == "curated"
     ],
-    use_container_width=True,
+    width="stretch",
 )
