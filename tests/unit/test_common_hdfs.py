@@ -122,3 +122,107 @@ def test_parquet_roundtrip_hive_and_ignored_entries(tmp_path):
     assert set(out.column_names) == {"symbol", "close", "year"}
     only = hdfs.read_parquet_dir(root, columns=["symbol"], filters=[("year", "=", 2026)], fs=fs)
     assert only.num_rows == 2
+
+
+# --- row group / đọc danh sách file / footer (cần pyarrow, chạy trong image cụm) ---
+
+
+def _ts_table(pa, start_minute, n, sym="FPT"):
+    from datetime import datetime, timedelta
+
+    base = datetime(2026, 1, 5, 9, 0) + timedelta(minutes=start_minute)
+    return pa.table(
+        {
+            "ts": pa.array([base + timedelta(minutes=i) for i in range(n)], pa.timestamp("us")),
+            # kiểu tường minh: list rỗng (n=0) sẽ bị suy ra kiểu null -> khác schema
+            "symbol": pa.array([sym] * n, pa.string()),
+            "close": pa.array([float(start_minute + i) for i in range(n)], pa.float64()),
+        }
+    )
+
+
+def test_row_groups_validation_errors():
+    pa = pytest.importorskip("pyarrow")
+    fs = FakeFS()
+    with pytest.raises(ValueError):
+        hdfs.write_parquet_row_groups_atomic([], "/d/f.parquet", fs=fs)
+    a = pa.table({"x": [1]})
+    b = pa.table({"y": [1]})
+    with pytest.raises(ValueError):
+        hdfs.write_parquet_row_groups_atomic([a, b], "/d/f.parquet", fs=fs)
+    assert fs.files == {}
+
+
+def test_row_groups_one_per_table_and_info(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow.parquet")
+    fsspec = pytest.importorskip("fsspec")
+    fs = fsspec.filesystem("file")
+    path = str(tmp_path / "d" / "f.parquet")
+    tables = [_ts_table(pa, 0, 3), _ts_table(pa, 10, 0), _ts_table(pa, 10, 5), _ts_table(pa, 20, 2)]
+    hdfs.write_parquet_row_groups_atomic(tables, path, fs=fs)
+    hdfs.write_parquet_row_groups_atomic(tables, path, fs=fs)  # ghi đè
+
+    info = hdfs.parquet_file_info(path, fs=fs)
+    assert info["num_rows"] == 10
+    assert info["num_row_groups"] == 3  # bảng 0 dòng bị bỏ qua
+    assert info["row_group_rows"] == [3, 5, 2]
+    assert info["size_bytes"] > 0
+    assert [p for p in fs.ls(str(tmp_path / "d"), detail=False)] == [path]  # không còn file tạm
+
+    out = hdfs.read_parquet_files([path], fs=fs)
+    assert out.num_rows == 10
+    assert out.column("close").to_pylist() == [0.0, 1.0, 2.0] + [10.0 + i for i in range(5)] + [
+        20.0,
+        21.0,
+    ]
+
+
+def test_parquet_file_info_missing_is_none(tmp_path):
+    pytest.importorskip("pyarrow.parquet")
+    fsspec = pytest.importorskip("fsspec")
+    assert (
+        hdfs.parquet_file_info(str(tmp_path / "nope.parquet"), fs=fsspec.filesystem("file")) is None
+    )
+
+
+def test_read_parquet_files_filter_prunes_rows(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pc = pytest.importorskip("pyarrow.compute")
+    pytest.importorskip("pyarrow.dataset")
+    fsspec = pytest.importorskip("fsspec")
+    from datetime import datetime
+
+    fs = fsspec.filesystem("file")
+    p1, p2 = str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")
+    hdfs.write_parquet_row_groups_atomic([_ts_table(pa, 0, 3), _ts_table(pa, 100, 3)], p1, fs=fs)
+    hdfs.write_parquet_row_groups_atomic([_ts_table(pa, 200, 3, sym="VNM")], p2, fs=fs)
+    cut = datetime(2026, 1, 5, 9, 0) + __import__("datetime").timedelta(minutes=100)
+
+    import pyarrow.dataset as ds
+
+    expr = ds.field("ts") >= pa.scalar(cut, pa.timestamp("us"))
+    out = hdfs.read_parquet_files([p1, p2], columns=["ts", "close"], filters=expr, fs=fs)
+    assert out.column_names == ["ts", "close"]
+    assert sorted(out.column("close").to_pylist()) == [100.0, 101.0, 102.0, 200.0, 201.0, 202.0]
+
+    dnf = hdfs.read_parquet_files([p1, p2], filters=[("symbol", "=", "VNM")], fs=fs)
+    assert dnf.num_rows == 3
+    assert pc.all(pc.equal(dnf.column("symbol"), "VNM")).as_py()
+
+
+def test_read_parquet_files_missing_handling(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow.dataset")
+    fsspec = pytest.importorskip("fsspec")
+    fs = fsspec.filesystem("file")
+    good = str(tmp_path / "g.parquet")
+    missing = str(tmp_path / "m.parquet")
+    hdfs.write_parquet_atomic(pa.table({"x": [1, 2]}), good, fs=fs)
+
+    assert hdfs.read_parquet_files([missing, good], fs=fs).num_rows == 2
+    empty = hdfs.read_parquet_files([missing], fs=fs)
+    assert empty.num_rows == 0 and empty.num_columns == 0
+    assert hdfs.read_parquet_files([], fs=fs).num_rows == 0
+    with pytest.raises(FileNotFoundError):
+        hdfs.read_parquet_files([good, missing], fs=fs, missing_ok=False)
