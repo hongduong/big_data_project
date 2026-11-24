@@ -1,0 +1,18 @@
+# Build context = repo root. Keep it small; README.md and pyproject.toml ARE needed.
+.git
+.github
+.venv
+venv
+.env
+docs
+tests
+benchmarks/results
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+build
+dist
+.DS_Store
