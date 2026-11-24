@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 import requests
 
@@ -12,7 +14,9 @@ from stocklake.common.http import (
 
 
 class FakeResponse:
-    def __init__(self, status=200, payload=None, text="", bad_json=False):
+    def __init__(self, status=200, payload=None, text="", bad_json=False, headers=None):
+        if headers is not None:
+            self.headers = headers
         self.status_code = status
         self._payload = payload
         self.text = text
@@ -158,3 +162,47 @@ def test_every_attempt_rate_limited():
     c.get_json("http://u")
     # lần 2 phải cách lần 1 ít nhất 1s dù backoff chỉ 0.1s
     assert t.now >= 1.0
+
+
+NOW = datetime(2026, 11, 24, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def blocked(resp):
+    c, _ = make(FakeSession(resp), now=lambda: NOW)
+    with pytest.raises(SourceBlockedError) as ei:
+        c.get_json("http://u")
+    return ei.value
+
+
+def test_retry_after_seconds():
+    e = blocked(FakeResponse(429, headers={"retry-after": "120"}))  # khác hoa thường
+    assert e.retry_after_raw == "120" and e.retry_after_seconds == 120.0
+    assert "Retry-After" in str(e) and e.status == 429 and e.url == "http://u"
+    assert blocked(FakeResponse(429, headers={"Retry-After": "1.5"})).retry_after_seconds == 1.5
+
+
+def test_retry_after_http_date():
+    e = blocked(FakeResponse(429, headers={"Retry-After": "Tue, 24 Nov 2026 10:05:00 GMT"}))
+    assert e.retry_after_seconds == 300.0
+    assert e.retry_after_raw == "Tue, 24 Nov 2026 10:05:00 GMT"
+    past = blocked(FakeResponse(429, headers={"Retry-After": "Tue, 24 Nov 2026 09:00:00 GMT"}))
+    assert past.retry_after_seconds == 0.0
+
+
+def test_retry_after_absent_or_garbage():
+    for resp in (FakeResponse(429), FakeResponse(429, headers={})):
+        e = blocked(resp)
+        assert e.retry_after_raw is None and e.retry_after_seconds is None
+    e = blocked(FakeResponse(429, headers={"Retry-After": "soon-ish"}))
+    assert e.retry_after_raw == "soon-ish" and e.retry_after_seconds is None
+    assert blocked(FakeResponse(429, headers={"Retry-After": "-5"})).retry_after_seconds == 0.0
+
+
+def test_retry_after_on_403():
+    e = blocked(FakeResponse(403, headers={"Retry-After": "30"}))
+    assert e.status == 403 and e.retry_after_seconds == 30.0
+
+
+def test_blocked_error_compat():
+    e = SourceBlockedError("m", 429, "http://u")
+    assert e.retry_after_raw is None and e.retry_after_seconds is None

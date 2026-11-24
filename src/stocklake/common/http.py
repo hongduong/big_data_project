@@ -7,6 +7,8 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -25,8 +27,60 @@ class HttpError(Exception):
         self.url = url
 
 
+def parse_retry_after(raw: str | None, now: Callable[[], datetime] | None = None) -> float | None:
+    """Đổi giá trị `Retry-After` (số giây hoặc HTTP-date) sang số giây, không âm."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        secs = float(text)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        current = now() if now is not None else datetime.now(timezone.utc)
+        secs = (when - current).total_seconds()
+    if secs != secs or secs in (float("inf"), float("-inf")):
+        return None
+    return max(0.0, secs)
+
+
+def _get_header(resp: Any, name: str) -> str | None:
+    """Đọc header không phân biệt hoa thường; response không có headers thì trả None."""
+    headers = getattr(resp, "headers", None)
+    if not headers:
+        return None
+    try:
+        for key, value in headers.items():
+            if str(key).lower() == name.lower():
+                return None if value is None else str(value)
+    except AttributeError:
+        return None
+    return None
+
+
 class SourceBlockedError(HttpError):
-    """Nguồn chặn (429/403): dừng, không retry, chờ rồi chạy lại sau."""
+    """Nguồn chặn (429/403): dừng, không retry, chờ rồi chạy lại sau.
+
+    `retry_after_raw`: header Retry-After như nhận được; `retry_after_seconds`: đã đổi sang giây.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        url: str | None = None,
+        retry_after_raw: str | None = None,
+        retry_after_seconds: float | None = None,
+    ):
+        super().__init__(message, status, url)
+        self.retry_after_raw = retry_after_raw
+        self.retry_after_seconds = retry_after_seconds
 
 
 class RetryExhaustedError(HttpError):
@@ -84,8 +138,10 @@ class HttpClient:
         session: Any = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] | None = None,
     ):
         self.name = name
+        self._now = now
         self.retry = retry
         self.default_headers = dict(default_headers or {})
         self.timeout = timeout
@@ -106,8 +162,18 @@ class HttpClient:
             else:
                 status = resp.status_code
                 if status in BLOCK_STATUSES:
-                    log.error("[%s] %s %s bị chặn (HTTP %s)", self.name, method, url, status)
-                    raise SourceBlockedError(f"Nguồn {self.name} chặn: HTTP {status}", status, url)
+                    raw = _get_header(resp, "Retry-After")
+                    secs = parse_retry_after(raw, self._now)
+                    extra = ""
+                    if raw is not None:
+                        parsed = "không đọc được" if secs is None else f"~{secs:.0f}s"
+                        extra = f", Retry-After={raw!r} ({parsed})"
+                    log.error(
+                        "[%s] %s %s bị chặn (HTTP %s%s)", self.name, method, url, status, extra
+                    )
+                    raise SourceBlockedError(
+                        f"Nguồn {self.name} chặn: HTTP {status}{extra}", status, url, raw, secs
+                    )
                 if status >= 500:
                     last = f"HTTP {status}"
                 elif status >= 400:
