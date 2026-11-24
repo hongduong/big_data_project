@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stocklake"
+version = "0.1.0"
+description = "Đồ án Big Data: dữ liệu chứng khoán Việt Nam trên Kafka + Spark + HDFS"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["requests", "pyyaml"]
+
+[project.optional-dependencies]
+spark = ["pyarrow", "numpy"]
+collector = ["yfinance", "feedparser", "confluent-kafka", "pyarrow", "fsspec"]
+dashboard = ["streamlit", "fsspec", "pyarrow", "pandas"]
+dev = ["pytest", "ruff", "pyspark==3.5.9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "spark: cần Java + pyspark, chạy trên PC",
+    "integration: cần cụm",
+]
