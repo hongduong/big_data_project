@@ -265,8 +265,8 @@ dq-intraday:
 # verify, clean, DQ, then the Parquet listing. Any failing step stops the recipe non-zero.
 # The history step passes --allow-trading-hours only because the sample is small (10 symbols,
 # a few requests each for the current year); the VN30 wave must never use it.
-# DQ runs with --no-write: its thresholds are still placeholders, so e2e prints the results
-# without failing on them and without appending to curated/dq_report.
+# DQ runs with --no-write: e2e prints the results without appending to curated/dq_report;
+# pass/fail against the approved thresholds is in the job's JSON line, not its exit code.
 e2e-sample:
 	@$(MAKE) --no-print-directory ingest-daily
 	@$(MAKE) --no-print-directory ingest-intraday-history HIST_GROUP=sample SYMBOLS= \
