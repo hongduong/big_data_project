@@ -146,7 +146,23 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **23,5GB / 13 vCPU**.
 | Collector / Scheduler | 1 | 1GB | 0,5 | Python |
 | Streamlit | 1 | 1GB | 0,5 | Python |
 
-- Đây là **ước lượng**. Sẽ xác nhận bằng `docker stats` trên PC ở lát cắt 0 và ghi lại số thật vào bảng này.
+**Số đo thật bằng `docker stats` trên PC (24/11/2026, 3 worker):**
+
+| Container | Giới hạn | Lúc rỗi | Khi chạy job thử |
+|---|---|---|---|
+| Kafka | 2GB | 315MB (15%) | 315MB (15%) |
+| NameNode | 1,5GB | 433MB (28%) | 435MB (28%) |
+| DataNode 1 / 2 / 3 | 1GB mỗi node | 314 / 321 / 316MB (~31%) | 340 / 354 / 340MB (~34%) |
+| Spark Master | 1GB | 251MB (25%) | 253MB (25%) |
+| Spark Worker 1 / 2 / 3 | 4GB mỗi worker | 229 / 199 / 203MB (~5%) | 2,55 / 2,06 / 1,86GB (64% / 51% / 47%) |
+| Spark driver | 2GB | 2MB (chưa có job) | 579MB (28%) |
+| Collector | 1GB | 1MB | 1MB |
+| Streamlit | 1GB | 54MB (5%) | 53MB (5%) |
+
+- Job thử: PySpark sinh 30 triệu dòng, sắp xếp, ghi Parquet lên HDFS (2,3GB), gom nhóm rồi đọc lại; chạy 68 giây trên cả 3 executor. Không container nào bị OOM kill.
+- Host: RAM thực tế 31.013MB. Lúc rỗi còn `available` 23.190MB; thấp nhất khi chạy job là 16.454MB.
+- Tổng giới hạn 23,5GB chỉ là trần; mức dùng thật lúc rỗi khoảng 3GB, khi chạy job thử khoảng 9GB.
+- **Chưa đo:** job có Python UDF hoặc pandas (tiến trình Python nằm ngoài heap 3GB của executor), job streaming chạy song song job batch, và collector khi tải dữ liệu thật. Cần đo lại ở Lát 1–2.
 - Job streaming đặt `spark.cores.max=2` để không chiếm hết executor của job batch.
 - Khi chạy benchmark scale-out và storage thì dừng job streaming.
 - Dùng Compose `profiles` (`w1`, `w2`, `w3`) để bật 1, 2, 3 worker.
@@ -166,7 +182,18 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **23,5GB / 13 vCPU**.
 
 Image `spark` build từ `apache/spark` 3.5.x, cài thêm `stocklake[spark]` và chép `jobs/`. Master, worker và driver dùng chung image này để executor thấy cùng một bản code.
 
-Tag cụ thể (bản vá của Spark 3.5 và Kafka 3.9) sẽ chốt khi pull thật trên PC ở lát cắt 0, rồi ghim cố định trong `docker-compose.yml`. Gói `spark-sql-kafka-0-10_2.12` phải cùng phiên bản với Spark.
+**Tag đã chốt (pull và chạy được trên PC 24/11/2026), ghim trong `.env.example` và `docker-compose.yml`:**
+
+| Image | Tag | Ghi chú |
+|---|---|---|
+| Spark | `apache/spark:3.5.9-scala2.12-java17-python3-ubuntu` | Java 17, Python 3.10.12 cho cả driver và executor |
+| Kafka | `apache/kafka:3.9.2` | Java 21 |
+| Hadoop | `apache/hadoop:3.3.6` | Java 8 |
+| Python | `python:3.11-slim` | Collector và Streamlit chạy Python 3.11 |
+
+Bốn jar của `spark-sql-kafka-0-10_2.12:3.5.9` được tải sẵn vào image `spark` lúc build, nên lúc gửi job không cần Internet. Đổi phiên bản Spark thì phải đổi theo.
+
+Image `spark` dùng Python 3.10 còn collector và Streamlit dùng 3.11; vì vậy `pyproject.toml` đặt `requires-python >= 3.10`.
 
 ### 2.4 Cấu hình HDFS đã chỉnh
 
