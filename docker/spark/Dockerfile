@@ -54,9 +54,12 @@ COPY conf/spark/spark-defaults.conf ${SPARK_HOME}/conf/spark-defaults.conf
 COPY conf/hadoop/core-site.xml conf/hadoop/hdfs-site.xml /opt/stocklake/conf/hadoop/
 
 # 4) stocklake wheel with the [spark] extra (pyarrow, numpy; pyspark comes from the image).
+#    Ubuntu's pip 22.0.2 builds this PEP 621 project as "UNKNOWN 0.0.0" (Debian-patched
+#    install scheme, pypa/setuptools#3269), so upgrade pip first.
 COPY pyproject.toml README.md /tmp/build/
 COPY src /tmp/build/src
 RUN set -eux; \
+    python3 -m pip install --upgrade pip; \
     python3 -m pip install "/tmp/build[spark]"; \
     rm -rf /tmp/build
 
