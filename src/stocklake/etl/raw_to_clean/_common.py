@@ -60,20 +60,29 @@ def is_empty_input_error(exc: Exception) -> bool:
 
 
 def write_partitioned(
-    spark: SparkSession, df: DataFrame, path: str, partition_cols: tuple[str, ...]
+    spark: SparkSession,
+    df: DataFrame,
+    path: str,
+    partition_cols: tuple[str, ...],
+    files_per_partition: int = 1,
 ) -> None:
-    """Ghi Parquet phân vùng, ít file mỗi phân vùng, sắp xếp theo symbol, ghi đè động."""
+    """Ghi Parquet phân vùng, sắp xếp theo symbol, ghi đè động.
+
+    `files_per_partition` > 1: chia mỗi phân vùng thành nhiều file theo hash(symbol)
+    (tháng quá lớn không bị dồn vào một task); mặc định mỗi phân vùng một file.
+    """
+    from pyspark.sql import functions as F
+
     key = "spark.sql.sources.partitionOverwriteMode"
     old = spark.conf.get(key, None)
     spark.conf.set(key, "dynamic")
     try:
-        (
-            df.repartition(*partition_cols)
-            .sortWithinPartitions("symbol")
-            .write.mode("overwrite")
-            .partitionBy(*partition_cols)
-            .parquet(path)
-        )
+        if files_per_partition > 1:
+            salt = F.pmod(F.hash("symbol"), F.lit(int(files_per_partition)))
+            out = df.repartition(*partition_cols, salt).sortWithinPartitions("symbol")
+        else:
+            out = df.repartition(*partition_cols).sortWithinPartitions("symbol")
+        out.write.mode("overwrite").partitionBy(*partition_cols).parquet(path)
     finally:
         if old is None:
             spark.conf.unset(key)

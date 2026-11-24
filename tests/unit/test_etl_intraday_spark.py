@@ -74,10 +74,34 @@ def make(spark, rows):
     return spark.createDataFrame([tuple(r[f.name] for f in schema.fields) for r in rows], schema)
 
 
-def clean(spark, rows):
+def hist_row(symbol="FPT", bar=None, source="vci", c=105.0, ingest=0):
+    bar = bar or utc(2026, 1, 5, 3, 0)
+    return {
+        "symbol": symbol,
+        "bar_ts": bar,
+        "open": 100.0,
+        "high": 110.0,
+        "low": 90.0,
+        "close": c,
+        "volume": 10,
+        "source": source,
+        "ingest_ts": utc(2026, 1, 6, 0, 0, ingest),
+        "available_at": bar + dt.timedelta(minutes=1),
+        "ingest_run_id": f"h-{ingest}",
+    }
+
+
+def make_hist(spark, rows):
+    schema = _nullable(to_spark(get_schema("raw", "intraday_history")))
+    return spark.createDataFrame([tuple(r[f.name] for f in schema.fields) for r in rows], schema)
+
+
+def clean(spark, rows, hist=None):
     from stocklake.etl.raw_to_clean.intraday import clean_intraday
 
-    return clean_intraday(make(spark, rows))
+    stream_df = make(spark, rows) if rows is not None else None
+    history_df = make_hist(spark, hist) if hist is not None else None
+    return clean_intraday(stream_df, history_df)
 
 
 def test_output_matches_contract(spark):
@@ -178,3 +202,69 @@ def test_untagged_replay_does_not_shadow_tagged_bar(spark):
     ]
     out = clean(spark, rows).collect()
     assert len(out) == 1 and out[0]["close"] == 5.0
+
+
+def test_history_beats_stream_real_beats_tagged_replay(spark):
+    bar = utc(2026, 1, 5, 3, 7)
+    stream = [
+        raw_row(bar=bar, source="replay", c=3.0, kafka=50),
+        raw_row(bar=bar, source="kbs", c=2.0, kafka=40),
+    ]
+    out = clean(spark, stream, [hist_row(bar=bar, source="vci", c=1.0)]).collect()
+    assert len(out) == 1 and out[0]["close"] == 1.0
+    out = clean(spark, stream).collect()
+    assert len(out) == 1 and out[0]["close"] == 2.0
+
+
+def test_history_vci_beats_other_history(spark):
+    bar = utc(2026, 1, 5, 3, 8)
+    hist = [
+        hist_row(bar=bar, source="vndirect", c=2.0, ingest=50),
+        hist_row(bar=bar, source="vci", c=1.0, ingest=1),
+    ]
+    out = clean(spark, None, hist).collect()
+    assert len(out) == 1 and out[0]["close"] == 1.0
+
+
+def test_history_only_and_stream_only(spark):
+    b1, b2 = utc(2026, 1, 5, 3, 0), utc(2026, 1, 5, 3, 1)
+    only_hist = clean(spark, None, [hist_row(bar=b1), hist_row(bar=b2)])
+    assert only_hist.count() == 2
+    only_stream = clean(spark, [raw_row(bar=b1), raw_row(bar=b2)], None)
+    assert only_stream.count() == 2
+    mixed = clean(spark, [raw_row(bar=b1)], [hist_row(bar=b2)])
+    assert mixed.count() == 2
+
+
+def test_empty_stream_with_history(spark):
+    out = clean(spark, [], [hist_row()])
+    assert out.count() == 1
+
+
+def test_history_duplicate_keeps_latest_ingest_ts(spark):
+    bar = utc(2026, 1, 5, 3, 9)
+    hist = [hist_row(bar=bar, c=1.0, ingest=1), hist_row(bar=bar, c=2.0, ingest=9)]
+    out = clean(spark, None, hist).collect()
+    assert len(out) == 1 and out[0]["close"] == 2.0
+
+
+def test_history_null_field_rejected(spark):
+    bad = hist_row("BAD")
+    bad["close"] = None
+    out = clean(spark, None, [bad, hist_row("OK")]).collect()
+    assert [r["symbol"] for r in out] == ["OK"]
+
+
+def test_untagged_replay_dropped_with_history_present(spark):
+    bar = utc(2026, 1, 5, 3, 10)
+    rows = [raw_row(bar=bar, source="replay", run_id=None, c=100200.0)]
+    out = clean(spark, rows, [hist_row("VNM", bar=bar)]).collect()
+    assert [r["symbol"] for r in out] == ["VNM"]
+
+
+def test_output_matches_contract_with_history(spark):
+    df = clean(spark, [raw_row()], [hist_row("VNM")])
+    expected = to_spark(CLEAN)
+    assert df.columns == [*CLEAN.column_names, *CLEAN.derived_partitions]
+    for f in expected.fields:
+        assert df.schema[f.name].dataType == f.dataType, f.name
