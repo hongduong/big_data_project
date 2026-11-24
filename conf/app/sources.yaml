@@ -1,0 +1,69 @@
+# Data sources (Planning section 0.2). Read by stocklake.common.http / stocklake.sources.
+#   base_url        root of the endpoints
+#   max_per_second  client-side rate limit for this source (collector rule: <= 2 req/s)
+#   enabled         false = client not written yet or source only used as fallback later
+# Endpoints are internal JSON APIs of broker websites, not committed public APIs.
+
+defaults:
+  timeout_seconds: 30
+  max_retries: 5
+  backoff_seconds: 2
+  # Stop and wait on these status codes (Planning decision 3).
+  stop_on_status: [403, 429]
+
+sources:
+  vci:
+    # Daily bars back to listing date (adjusted, VND), 1-minute bars from 11/09/2023, symbol list.
+    base_url: https://trading.vietcap.com.vn/api/
+    max_per_second: 2
+    enabled: true
+
+  vndirect:
+    # finfo: daily bars from 2013 (close + adClose, thousand VND), foreign flows from 30/08/2018,
+    # stocks list, corporate events. dchart: 1-minute bars (sparser than VCI).
+    base_url: https://api-finfo.vndirect.com.vn/
+    dchart_base_url: https://dchart-api.vndirect.com.vn/  # TODO: confirm when writing the client
+    max_per_second: 2
+    enabled: true
+
+  kbs:
+    # Fallback: ~10 years of daily bars, ~3 months of 1-minute bars.
+    base_url: https://kbbuddywts.kbsec.com.vn/
+    max_per_second: 2
+    enabled: false
+
+  cafef:
+    # Foreign flows JSON (max 30 rows / ~1 year window per request); 2015-2018 for VNINDEX/VN30.
+    base_url: https://cafef.vn/   # TODO: exact JSON endpoint path when writing the client
+    max_per_second: 1
+    enabled: false
+
+  yahoo:
+    # Via yfinance; series from 01/2015.
+    base_url: https://query1.finance.yahoo.com/
+    max_per_second: 1
+    enabled: false
+    tickers:
+      us10y: "^TNX"
+      dxy: "DX-Y.NYB"
+      brent: "BZ=F"
+      sp500: "^GSPC"
+      vix: "^VIX"
+      usdvnd: "VND=X"
+
+  fred:
+    # fredgraph.csv, no API key. First call may time out at 30 s; retry.
+    base_url: https://fred.stlouisfed.org/graph/fredgraph.csv
+    max_per_second: 1
+    enabled: false
+    series: [DGS10]
+
+  rss:
+    # Collect and store only; no content analysis. Feed URLs are placeholders, verify before use.
+    max_per_second: 1
+    enabled: false
+    poll_interval_seconds: 300
+    feeds:
+      cafef: https://cafef.vn/thi-truong-chung-khoan.rss   # TODO: verify
+      vietstock: https://vietstock.vn/830/chung-khoan/co-phieu.rss   # TODO: verify
+      vnexpress: https://vnexpress.net/rss/kinh-doanh.rss   # TODO: verify

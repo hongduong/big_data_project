@@ -1,0 +1,14 @@
+# Symbol lists used by collectors and producers (skeleton for slice 0/1).
+# The full HOSE universe (412 symbols) is loaded from the source listings
+# (VCI getAll / VNDirect stocks) in slice 2; this file holds the sample set.
+
+sample:
+  # Slice 1 sample data: 10 symbols, 1 year of daily bars, 5 days of 1-minute bars.
+  stocks: [FPT, VNM, VCB, HPG, MWG, VIC, VHM, TCB, MBB, SSI]
+  indices: [VNINDEX, VN30]
+
+# Minute-bar backfill wave 1 (Planning decision 3). Filled in when the VN30 basket
+# is pulled from the source; left empty on purpose.
+vn30: []
+
+exchanges: [HOSE]

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  Mounted read-only into every HDFS container at /opt/hadoop/etc/hadoop/core-site.xml
+  (HADOOP_CONF_DIR of apache/hadoop:3.3.6) and baked into the Spark image at
+  /opt/stocklake/conf/hadoop (HADOOP_CONF_DIR there).
+  Do NOT also configure HDFS through CORE-SITE.XML_* env vars: the image's envtoconf.py
+  would then try to rewrite this read-only file and the container would fail to start.
+-->
+<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://namenode:8020</value>
+  </property>
+  <property>
+    <name>hadoop.tmp.dir</name>
+    <value>/data/tmp</value>
+  </property>
+  <!-- User shown for WebHDFS calls without user.name (permissions are off anyway). -->
+  <property>
+    <name>hadoop.http.staticuser.user</name>
+    <value>hadoop</value>
+  </property>
+</configuration>

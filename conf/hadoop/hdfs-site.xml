@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!-- Planning section 2.4. Mounted read-only at /opt/hadoop/etc/hadoop/hdfs-site.xml. -->
+<configuration>
+  <property>
+    <name>dfs.replication</name>
+    <value>2</value>
+  </property>
+
+  <!-- Storage: /data is the named volume (nn_data, dn1_data..dn3_data) in each container. -->
+  <property>
+    <name>dfs.namenode.name.dir</name>
+    <value>file:///data/namenode</value>
+  </property>
+  <property>
+    <name>dfs.datanode.data.dir</name>
+    <value>file:///data/datanode</value>
+  </property>
+
+  <!--
+    TUNED FOR THE FAULT-TOLERANCE BENCHMARK (defaults: 300000 ms and 3 s).
+    Dead-DataNode detection = 2 x recheck-interval + 10 x heartbeat-interval
+                            = 2 x 15 s + 10 x 1 s = 40 s   (default: 630 s).
+    The report must state that these values were changed for the measurement.
+  -->
+  <property>
+    <name>dfs.namenode.heartbeat.recheck-interval</name>
+    <value>15000</value>
+  </property>
+  <property>
+    <name>dfs.heartbeat.interval</name>
+    <value>1</value>
+  </property>
+
+  <property>
+    <name>dfs.webhdfs.enabled</name>
+    <value>true</value>
+  </property>
+  <!-- Student cluster: no HDFS permission checks. -->
+  <property>
+    <name>dfs.permissions.enabled</name>
+    <value>false</value>
+  </property>
+
+  <!-- Containers: register and reach DataNodes by container hostname, not by IP. -->
+  <property>
+    <name>dfs.namenode.datanode.registration.ip-hostname-check</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>dfs.client.use.datanode.hostname</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>dfs.datanode.use.datanode.hostname</name>
+    <value>true</value>
+  </property>
+
+  <!-- Listen on every interface so published host ports work. -->
+  <property>
+    <name>dfs.namenode.rpc-bind-host</name>
+    <value>0.0.0.0</value>
+  </property>
+  <property>
+    <name>dfs.namenode.servicerpc-bind-host</name>
+    <value>0.0.0.0</value>
+  </property>
+  <property>
+    <name>dfs.namenode.http-bind-host</name>
+    <value>0.0.0.0</value>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address</name>
+    <value>namenode:9870</value>
+  </property>
+</configuration>
