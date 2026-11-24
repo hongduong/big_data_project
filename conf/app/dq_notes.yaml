@@ -1,0 +1,54 @@
+# Ghi chú riêng cho DQ nến phút (stocklake.dq.notes, đọc qua load_app_conf("dq_notes")).
+# Đây là DỮ LIỆU: không lọc gì ở raw/clean. Báo cáo DQ dùng để:
+#   - tính thêm khối `excluding_known_periods` (bỏ các giai đoạn dưới đây, gồm cả ngày trống);
+#   - gắn `note` vào các dòng xấu nhất rơi vào giai đoạn / ngày đã biết.
+# Định dạng:
+#   known_periods:   symbol (viết hoa), start/end (YYYY-MM-DD, start null = từ đầu dữ liệu),
+#                    label, note
+#   known_anomalies: date (YYYY-MM-DD), symbols (rỗng = toàn thị trường), label, note, status
+
+known_periods:
+  # BSR: kiểm trên clean/intraday_1m ngày 24/11/2026 — nến ngoài mẫu HOSE (trước 09:15,
+  # sau 14:45 tới 15:00) có ở mọi ngày tới 2025-01-06; 2025-01-07..2025-01-16 không có nến
+  # (8 phiên trong lịch); từ 2025-01-17 nến theo mẫu HOSE (09:15–14:45).
+  - symbol: BSR
+    start: null
+    end: 2025-01-06
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: giờ giao dịch khác mẫu HOSE (nến trước
+      09:15, sau 14:45 tới 15:00, vài nến giờ nghỉ trưa), có vẻ là sàn khác trước khi chuyển
+      sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: BSR
+    start: 2025-01-07
+    end: 2025-01-16
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong các phiên này,
+      ngay trước khi nến theo mẫu HOSE từ 2025-01-17. Dữ liệu giữ nguyên ở raw và clean.
+  # MCH: cùng kiểu — ngoài mẫu tới 2025-12-17, không có nến 2025-12-18..2025-12-24
+  # (5 phiên), mẫu HOSE từ 2025-12-25.
+  - symbol: MCH
+    start: null
+    end: 2025-12-17
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: giờ giao dịch khác mẫu HOSE (nến trước
+      09:15, sau 14:45 tới 15:00), có vẻ là sàn khác trước khi chuyển sang HOSE; nhiều ngày
+      rất ít nến. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: MCH
+    start: 2025-12-18
+    end: 2025-12-24
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong các phiên này,
+      ngay trước khi nến theo mẫu HOSE từ 2025-12-25. Dữ liệu giữ nguyên ở raw và clean.
+
+known_anomalies:
+  - date: 2024-11-15
+    symbols: []
+    label: volume_phut_thap_hon_ngay_2024_11_15
+    note: >-
+      Volume phút thấp hơn volume ngày trên toàn thị trường (trung vị khoảng -0,5% trên 28 mã;
+      VHM -4,1%, HDB -3,9%) dù số nến/ngày đủ.
+    status: chưa giải thích; không điều tra thêm (quyết định 24/11/2026)
