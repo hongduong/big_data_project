@@ -8,13 +8,21 @@ version = "0.1.0"
 description = "Đồ án Big Data: dữ liệu chứng khoán Việt Nam trên Kafka + Spark + HDFS"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["requests", "pyyaml"]
+dependencies = ["requests==2.34.2", "pyyaml==6.0.4"]
 
 [project.optional-dependencies]
-spark = ["pyarrow", "numpy"]
-collector = ["yfinance", "feedparser", "confluent-kafka", "pyarrow", "fsspec"]
-dashboard = ["streamlit", "fsspec", "pyarrow", "pandas"]
-dev = ["pytest", "ruff", "pyspark==3.5.9"]
+# pyarrow ghim cùng một bản ở cả 3 image; 25.0.1 cài được trên Python 3.10 (image spark) và 3.11.
+spark = ["pyarrow==25.0.1", "numpy==2.2.6"]
+collector = [
+    "yfinance==1.8.0",
+    "feedparser==6.0.14",
+    "confluent-kafka==2.16.2",
+    "pyarrow==25.0.1",
+    "fsspec==2026.9.0",
+    "pandas==3.1.1",
+]
+dashboard = ["streamlit==1.67.0", "fsspec==2026.9.0", "pyarrow==25.0.1", "pandas==3.1.1"]
+dev = ["pytest==9.2.0", "ruff==0.17.6", "pyspark==3.5.9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
