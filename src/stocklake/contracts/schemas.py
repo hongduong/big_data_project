@@ -296,6 +296,12 @@ CLEAN_INTRADAY_1M = TableSchema(
         _c("bar_ts", "timestamp"),
         *_OHLC,
         _c("volume", "long"),
+        _c(
+            "source",
+            "string",
+            description="Nguồn của dòng được chọn (history: nguồn của file, vd vci; "
+            "streaming: tên nguồn thật; replay có run id: replay)",
+        ),
         _c("trade_date", "date"),
         _c("available_at", "timestamp"),
     ),

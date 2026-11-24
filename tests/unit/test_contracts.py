@@ -91,6 +91,20 @@ def test_raw_intraday_history():
     assert table_path("raw", "intraday_history") == "/data/raw/intraday_history"
 
 
+def test_clean_intraday_1m_has_source_like_daily():
+    s = get_schema("clean", "intraday_1m")
+    assert s.column_names == (
+        "symbol", "bar_ts", "open", "high", "low", "close", "volume",
+        "source", "trade_date", "available_at",
+    )  # fmt: skip
+    cols = {c.name: c for c in s.columns}
+    assert cols["source"].type == "string" and not cols["source"].nullable
+    # Cùng vị trí với clean.daily_ohlcv: ngay sau volume.
+    daily = get_schema("clean", "daily_ohlcv").column_names
+    assert daily[daily.index("volume") + 1] == "source"
+    assert s.primary_key == ("symbol", "bar_ts")
+
+
 def test_schema_validation_errors():
     col = Column("a", "string")
     with pytest.raises(ValueError):
