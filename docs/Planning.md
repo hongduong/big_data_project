@@ -471,12 +471,19 @@ Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `sym
 
 **Số đo trước/sau (24/11/2026, VN30 4,83 triệu dòng, 3 worker; thời gian = spark-submit từ lúc gọi tới lúc thoát, trung vị 3 lần):**
 
+Ba phiên bản job clean nến phút: "luôn full" (trước 24/11/2026); "tăng dần v1" (sáng 24/11/2026: `--full` đọc raw hai lần, một lần tính fingerprint, một lần dựng lại); "tăng dần v2" (tối 24/11/2026: `--full`/`--dates` đọc raw một lần, persist, fingerprint và clean cùng lấy từ lần quét đó; khoá TTL ngắn + gia hạn).
+
+| Việc | Luôn full | Tăng dần v1 | Tăng dần v2 |
+|---|---|---|---|
+| `intraday_raw_to_clean`, dựng lại toàn bộ (`--full`, hoặc lần đầu chưa có trạng thái) | 38,8 giây | 50,9 giây (21 giây tính fingerprint + 26 giây dựng lại) | 44,0 giây (43,9 / 44,6 / 44,0; job 40,2 giây: quét chung + thống kê ~20 giây, fingerprint 6,4, khử trùng 7,2, ghi ~6,5) |
+| Không có gì đổi, trong 15 phút sau một thay đổi (tháng vẫn là ứng viên, chỉ tính fingerprint) | 38,8 giây | 26,0 giây, không ghi, không khoá | 22,5 giây (1 tháng ứng viên, fingerprint 17,5 giây), không ghi, không khoá |
+| Không có gì đổi, đã lắng | 38,8 giây | 4,8 giây (job 1,0 giây), không job Spark, không ghi | 4,7 giây (job 1,1 giây); vẫn cần một lượt "lắng" (22,9 giây, ghi trạng thái) sau khi qua 900 giây |
+| Đổi một tháng (replay 1 ngày 2026-11) / `--dates 2026-11-20` | 38,8 giây | 33,6 / 33,3 giây, chỉ ghi lại tháng 2026-11 | 34,3 giây (33,4 / 34,3 / 34,4; 3 replay khác nhau), chỉ ghi lại tháng 2026-11, 38 tháng khác giữ nguyên file |
+
+Replay và chia lại row group (đo sáng 24/11/2026):
+
 | Việc | Trước | Sau |
 |---|---|---|
-| `intraday_raw_to_clean`, dựng lại toàn bộ (`--full`, hoặc lần đầu chưa có trạng thái) | 38,8 giây (luôn full) | 50,9 giây (21 giây tính fingerprint + 26 giây dựng lại) |
-| Không có gì đổi, trong 15 phút sau một thay đổi (tháng vẫn là ứng viên, chỉ tính fingerprint) | 38,8 giây | 26,0 giây, không ghi, không khoá |
-| Không có gì đổi, đã lắng | 38,8 giây | 4,8 giây (job 1,0 giây), không job Spark, không ghi |
-| Đổi một tháng (replay 1 ngày 2026-11) / `--dates 2026-11-20` | 38,8 giây | 33,6 / 33,3 giây, chỉ ghi lại tháng 2026-11 |
 | Replay VN30 20 ngày (130.269 bản tin), mục tiêu 2.000 msg/giây | ~1.450 msg/giây | 2.000 msg/giây (2 lần); mục tiêu 5.000 đạt 4.999,7. Collector CPU trung vị 11%, đỉnh 54% (lúc đọc tháng đầu), RAM đỉnh 282MiB |
 | Chia lại 116 file `intraday_history` thành row group theo tháng | 116 row group, 100.729.764 byte | 1.125 row group, 103.078.443 byte (+2,3%), 64 giây, không gọi VCI |
 
@@ -648,7 +655,8 @@ Nhánh `main` giữ nguyên, không nhận file nào từ bước này.
    - Lý do 1: cache JSONL trên volume của collector nằm ngoài HDFS, Spark không đọc được.
    - Lý do 2: đẩy ~70 triệu bản tin qua Kafka mất ~10 giờ ở 2.000 msg/giây, và mỗi micro-batch trải ~800 ngày giao dịch, sinh hàng trăm nghìn file nhỏ.
 6. **Khoá đọc/ghi trên HDFS cho bảng `clean` (24/11/2026, phương án A):** job ghi `clean` (`daily_raw_to_clean`, `intraday_raw_to_clean`) giữ khoá ghi `clean.<bảng>` quanh lệnh ghi; job đọc (DQ) giữ khoá đọc suốt lúc đọc. Khoá là file nhỏ dưới `/locks/<tên>/` (`stocklake.common.locks`), ghi độc quyền, đọc chung, bên ghi được ưu tiên.
-   - Khoá có hạn (ghi 1.800 giây, đọc 3.600 giây, chờ tối đa 900 giây): job chết giữa chừng thì khoá tự hết hạn, không phải xoá tay.
+   - Khoá có hạn ngắn, kèm luồng gia hạn (cập nhật 24/11/2026; trước đó ghi 1.800 giây, đọc 3.600 giây): khoá ghi 5 phút, khoá đọc 10 phút. Trong lúc giữ, một luồng nền gia hạn khoá mỗi 1/3 TTL, nên job chạy lâu hơn TTL vẫn giữ khoá.
+   - Job chết giữa chừng (kể cả `kill -9`): không còn ai gia hạn, bảng được giải phóng sau tối đa một TTL (5 phút với bên ghi, 10 phút với bên đọc) tính từ lần gia hạn cuối; bên chờ tự xoá file khoá hết hạn, không phải xoá tay. Bên chờ đợi tối đa 15 phút (900 giây), lâu hơn cả hai TTL nên luôn chờ được tới khi khoá của job chết hết hạn. Đo 24/11/2026: writer chết -> bên chờ giành khoá sau 279 giây; DQ bị `kill -9` khi giữ khoá đọc -> job clean `--full` chờ 537 giây rồi chạy xong bình thường.
    - Dashboard không giữ khoá; đọc lỗi thì nghỉ 1,5 giây rồi đọc lại đúng một lần.
    - Lý do: lần đo Lát 2 job DQ lỗi `FileNotFoundException` khi đọc đúng lúc job clean ghi đè phân vùng (mục 2.2).
 7. **Clean nến phút tăng dần, row group theo tháng, replay theo chunk tháng (24/11/2026):**
