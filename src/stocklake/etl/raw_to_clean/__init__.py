@@ -1,18 +1,24 @@
-"""Biến đổi raw -> clean: hàm nhận và trả DataFrame để test bằng Spark local."""
+"""Biến đổi raw -> clean: hàm nhận và trả DataFrame để test bằng Spark local.
+
+Import lười (pyspark chỉ nạp khi gọi), nên `import stocklake.etl.raw_to_clean` không cần pyspark.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from importlib import import_module
+from typing import Any
 
-if TYPE_CHECKING:
-    from pyspark.sql import DataFrame
+_EXPORTS = {
+    "clean_daily_ohlcv": "daily",
+    "run_daily_raw_to_clean": "daily",
+    "clean_intraday": "intraday",
+    "run_intraday_raw_to_clean": "intraday",
+}
+
+__all__ = sorted(_EXPORTS)
 
 
-def clean_daily_ohlcv(df: DataFrame) -> DataFrame:
-    """Chọn nguồn, đổi đơn vị sang đồng, khử trùng, gắn available_at và dq_flags."""
-    raise NotImplementedError("Lát 1")
-
-
-def clean_intraday(df: DataFrame) -> DataFrame:
-    """Khử trùng theo (symbol, bar_ts), thêm year/month, sắp xếp theo symbol."""
-    raise NotImplementedError("Lát 1")
+def __getattr__(name: str) -> Any:
+    if name in _EXPORTS:
+        return getattr(import_module(f"{__name__}.{_EXPORTS[name]}"), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
