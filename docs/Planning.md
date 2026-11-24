@@ -200,7 +200,7 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **24,5GB / 14 vCPU** (spar
 - JSON của master xác nhận 3 app cùng lúc: streaming 2 core (worker3), `intraday_raw_to_clean` 4 core (worker1, 2), `daily_raw_to_clean` WAITING ~35 giây rồi mới nhận 4 core (job batch vẫn không đặt `spark.cores.max`, như Lát 1).
 - Host `available` thấp nhất 14.844MB. Không container nào bị OOM kill hay khởi động lại. Driver đạt 2 CPU (đúng trần) nhưng RAM còn dư 45%; worker với job ~5 triệu dòng mới tới ~2,1GB / 4GB, chưa chạm trần.
 - Latency đầu-cuối của lần phát lại này: p50 7,2 giây, p95 16,9 giây (lần 1: 7,2 / 17,8 giây); batch đầu 13,8 giây (khởi động executor), các batch sau 0,7–2,2 giây. Replay đạt ~1.450 msg/giây thay vì 2.000 vì collector (0,5 CPU) vừa đọc WebHDFS vừa gửi.
-- Lần 1 chạy `intraday_dq` thay `daily_raw_to_clean` và job DQ **lỗi** `FileNotFoundException` vì đọc `clean/intraday_1m` đúng lúc `intraday_raw_to_clean` ghi đè phân vùng: không chạy DQ (hay job đọc `clean`) song song với job ghi lại chính bảng đó.
+- Lần 1 chạy `intraday_dq` thay `daily_raw_to_clean` và job DQ **lỗi** `FileNotFoundException` vì đọc `clean/intraday_1m` đúng lúc `intraday_raw_to_clean` ghi đè phân vùng: không chạy DQ (hay job đọc `clean`) song song với job ghi lại chính bảng đó. Từ 24/11/2026 hai job phối hợp qua khoá trên HDFS (mục 8, quyết định 6) nên chạy cùng lúc được.
 - Job streaming đặt `spark.cores.max=2` để không chiếm hết executor của job batch.
 - Khi chạy benchmark scale-out và storage thì dừng job streaming.
 - Dùng Compose `profiles` (`w1`, `w2`, `w3`) để bật 1, 2, 3 worker.
@@ -432,7 +432,7 @@ Khoá khử trùng: `news_id`.
 | `intraday_prices` | như topic | như topic + `kafka_partition`, `kafka_offset`, `kafka_ts`, `spark_batch_ts` | `trade_date` |
 | `market_news` | như topic | như topic + cột Kafka | `ingest_date` |
 
-Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `symbol` hoặc `series`, khoảng ngày; riêng `intraday_history` theo `symbol`, `year`). Chạy lại thì ghi đè đúng file đó, nên không tạo trùng. `intraday_history` nằm riêng với `intraday_prices`: bảng trước do collector ghi thẳng, bảng sau do Spark Structured Streaming ghi từ Kafka.
+Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `symbol` hoặc `series`, khoảng ngày; riêng `intraday_history` theo `symbol`, `year`). Chạy lại thì ghi đè đúng file đó, nên không tạo trùng. File mã-năm của `intraday_history` có **một row group cho mỗi tháng giờ VN** (dòng sắp theo `bar_ts`, có thống kê min/max) để replay và Spark bỏ qua tháng không cần; file năm hiện tại chỉ ghi lại khi nến đổi. File cũ được chia lại bằng `make regroup-intraday-history` (không gọi VCI). `intraday_history` nằm riêng với `intraday_prices`: bảng trước do collector ghi thẳng, bảng sau do Spark Structured Streaming ghi từ Kafka.
 
 ### 4.4 Lớp `clean` (`/data/clean/...`)
 
@@ -466,6 +466,19 @@ Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `sym
 - **Chọn:** nến ngày phân vùng theo `year`, sắp xếp theo `symbol` trong file để tận dụng thống kê row group của Parquet. Nến phút phân vùng theo `year`, `month`.
 - Phương án `year`/`symbol` vẫn được dựng trong bài đo storage làm đối chứng.
 - **Compaction:** Structured Streaming ghi danh sách file vào `_spark_metadata`, nên không gom file tại thư mục streaming đang ghi. `raw` do streaming ghi (riêng `intraday_history` do collector ghi theo file symbol-năm); job batch đọc `raw`, ghi sang `clean` đã gom file. Bài đo trước/sau compaction so `raw` với `clean`.
+- **Không dựng lại toàn bộ `clean/intraday_1m` mỗi lần:** job lưu trạng thái `_build_state.json` cạnh bảng (fingerprint từng tháng: số dòng, tổng volume, checksum). Tháng ứng viên là tháng có thư mục raw (`source=*/year=*`, `trade_date=*`) có mtime mới hơn mốc lần trước (trừ hao 900 giây); chỉ tháng ứng viên được tính lại fingerprint và chỉ tháng có fingerprint đổi mới được ghi đè. Thiếu/hỏng trạng thái thì chạy full; `--full`, `--dates` để ép.
+- **Đọc/ghi `clean` cùng lúc:** job ghi `clean` và job đọc (DQ) phối hợp qua file khoá trên HDFS (`/locks/clean.<bảng>/writer.lock`, `reader-<id>.lock`): ghi độc quyền, đọc chung, bên ghi được ưu tiên, khoá tự hết hạn khi job chết. Dashboard không giữ khoá, chỉ đọc lại một lần khi lỗi.
+
+**Số đo trước/sau (24/11/2026, VN30 4,83 triệu dòng, 3 worker; thời gian = spark-submit từ lúc gọi tới lúc thoát, trung vị 3 lần):**
+
+| Việc | Trước | Sau |
+|---|---|---|
+| `intraday_raw_to_clean`, dựng lại toàn bộ (`--full`, hoặc lần đầu chưa có trạng thái) | 38,8 giây (luôn full) | 50,9 giây (21 giây tính fingerprint + 26 giây dựng lại) |
+| Không có gì đổi, trong 15 phút sau một thay đổi (tháng vẫn là ứng viên, chỉ tính fingerprint) | 38,8 giây | 26,0 giây, không ghi, không khoá |
+| Không có gì đổi, đã lắng | 38,8 giây | 4,8 giây (job 1,0 giây), không job Spark, không ghi |
+| Đổi một tháng (replay 1 ngày 2026-11) / `--dates 2026-11-20` | 38,8 giây | 33,6 / 33,3 giây, chỉ ghi lại tháng 2026-11 |
+| Replay VN30 20 ngày (130.269 bản tin), mục tiêu 2.000 msg/giây | ~1.450 msg/giây | 2.000 msg/giây (2 lần); mục tiêu 5.000 đạt 4.999,7. Collector CPU trung vị 11%, đỉnh 54% (lúc đọc tháng đầu), RAM đỉnh 282MiB |
+| Chia lại 116 file `intraday_history` thành row group theo tháng | 116 row group, 100.729.764 byte | 1.125 row group, 103.078.443 byte (+2,3%), 64 giây, không gọi VCI |
 
 ### (b) Đo end-to-end latency
 
@@ -634,3 +647,12 @@ Nhánh `main` giữ nguyên, không nhận file nào từ bước này.
    - `clean/intraday_1m` là hợp của `raw/intraday_history` và `raw/intraday_prices`, khoá (`symbol`, `bar_ts`). Ưu tiên: history (vci) > streaming từ nguồn thật > replay có run id; dòng replay không có run id bị loại.
    - Lý do 1: cache JSONL trên volume của collector nằm ngoài HDFS, Spark không đọc được.
    - Lý do 2: đẩy ~70 triệu bản tin qua Kafka mất ~10 giờ ở 2.000 msg/giây, và mỗi micro-batch trải ~800 ngày giao dịch, sinh hàng trăm nghìn file nhỏ.
+6. **Khoá đọc/ghi trên HDFS cho bảng `clean` (24/11/2026, phương án A):** job ghi `clean` (`daily_raw_to_clean`, `intraday_raw_to_clean`) giữ khoá ghi `clean.<bảng>` quanh lệnh ghi; job đọc (DQ) giữ khoá đọc suốt lúc đọc. Khoá là file nhỏ dưới `/locks/<tên>/` (`stocklake.common.locks`), ghi độc quyền, đọc chung, bên ghi được ưu tiên.
+   - Khoá có hạn (ghi 1.800 giây, đọc 3.600 giây, chờ tối đa 900 giây): job chết giữa chừng thì khoá tự hết hạn, không phải xoá tay.
+   - Dashboard không giữ khoá; đọc lỗi thì nghỉ 1,5 giây rồi đọc lại đúng một lần.
+   - Lý do: lần đo Lát 2 job DQ lỗi `FileNotFoundException` khi đọc đúng lúc job clean ghi đè phân vùng (mục 2.2).
+7. **Clean nến phút tăng dần, row group theo tháng, replay theo chunk tháng (24/11/2026):**
+   - `intraday_raw_to_clean` chỉ dựng lại tháng có đầu vào đổi (trạng thái `_build_state.json` + fingerprint từng tháng, mục 5(a)); `--full` và `--dates` vẫn dùng được.
+   - File `raw/intraday_history` có một row group mỗi tháng giờ VN (mục 4.3); 116 file VN30 cũ đã được chia lại tại chỗ, không gọi VCI.
+   - Replay đọc từng tháng một bằng danh sách file tường minh, có luồng đọc trước tháng kế tiếp.
+8. **Quy tắc đạt/không đạt của DQ nến phút (24/11/2026):** check có bộ số loại trừ giai đoạn đã biết (`conf/app/dq_notes.yaml`) thì đạt/không đạt tính trên bộ số loại trừ; bộ số toàn bộ dữ liệu vẫn tính và ghi vào `dq_report` với tên `<check>__all_data`, chỉ để tham khảo. Check không có bộ số loại trừ (volume, ngày ngoài lịch) tính trên toàn bộ dữ liệu. Chi tiết ở `jobs/dq/README.md`.
