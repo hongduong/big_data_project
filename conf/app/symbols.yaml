@@ -7,8 +7,10 @@ sample:
   stocks: [FPT, VNM, VCB, HPG, MWG, VIC, VHM, TCB, MBB, SSI]
   indices: [VNINDEX, VN30]
 
-# Minute-bar backfill wave 1 (Planning decision 3). Filled in when the VN30 basket
-# is pulled from the source; left empty on purpose.
-vn30: []
+# Minute-bar backfill wave 1 (Planning decision 3): current VN30 basket from VCI getByGroup.
+vn30: [ACB, BID, BSR, CTG, FPT, GAS, GVR, HDB, HPG, LPB, MBB, MCH, MSN, MWG, SAB, SHB, SSB, SSI,
+  STB, TCB, TCX, VCB, VHM, VIB, VIC, VJC, VNM, VPB, VPL, VRE]
+vn30_as_of: "2026-11-24"
+vn30_source: "https://trading.vietcap.com.vn/api/price/symbols/getByGroup?group=VN30"
 
 exchanges: [HOSE]
