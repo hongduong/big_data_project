@@ -5,7 +5,9 @@ Chạy: spark-submit jobs/dq/intraday_dq.py [--symbols FPT VNM] [--start D] [--e
 
 import argparse
 import json
+import sys
 
+from stocklake.common.locks import LockTimeout
 from stocklake.common.spark import get_spark
 from stocklake.dq.intraday import run_intraday_dq
 
@@ -16,11 +18,14 @@ parser.add_argument("--end", help="Ngày kết thúc YYYY-MM-DD")
 parser.add_argument("--no-write", action="store_true", help="Không ghi curated/dq_report")
 args = parser.parse_args()
 
-report = run_intraday_dq(
-    get_spark("intraday_dq"),
-    symbols=args.symbols or None,
-    start=args.start,
-    end=args.end,
-    write=not args.no_write,
-)
+try:
+    report = run_intraday_dq(
+        get_spark("intraday_dq"),
+        symbols=args.symbols or None,
+        start=args.start,
+        end=args.end,
+        write=not args.no_write,
+    )
+except LockTimeout as exc:
+    sys.exit(f"DQ không lấy được khoá đọc bảng clean (job clean đang ghi quá lâu?): {exc}")
 print(json.dumps(report, default=str))

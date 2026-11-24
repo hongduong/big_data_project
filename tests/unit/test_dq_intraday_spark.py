@@ -349,3 +349,78 @@ def test_worst_lists_flag_known_period_and_anomaly(spark):
     assert by_key[("A", "2026-01-09")] == "ngay_la"
     assert by_key[("A", "2026-01-05")] is None
     assert by_key[("P", "2026-01-09")] == "ngay_la"
+
+
+# ------------------------------------------------------------ runner: kết luận + khoá đọc
+
+
+def _run_runner(spark, monkeypatch, notes):
+    import json
+
+    pytest.importorskip("stocklake.common.locks", reason="module khoá chưa có")
+    from stocklake.common.locks import MemoryLockFs
+    from stocklake.dq import intraday as dq
+
+    ivs = intraday(spark, _period_rows())
+    dvs = daily(
+        spark,
+        [("VNINDEX", d, 1) for d in DAYS] + [("A", d, 1000) for d in DAYS],
+    )
+    tables = {"intraday_1m": ivs, "daily_ohlcv": dvs}
+    monkeypatch.setattr(dq, "_read_clean", lambda _spark, table, cols: tables[table].select(*cols))
+    report = dq.run_intraday_dq(spark, write=False, notes=notes, lock_fs=MemoryLockFs())
+    json.dumps(report)  # phải serialise được
+    return report
+
+
+def test_runner_verdict_excludes_known_periods(spark, monkeypatch):
+    from stocklake.dq.notes import DqNotes
+
+    rep = _run_runner(spark, monkeypatch, DqNotes(_periods(), ()))
+    checks = {c["check_name"]: c for c in rep["results"]}
+    cov = checks["intraday_day_coverage_ratio"]
+    assert cov["basis"] == "excluding_known_periods" and cov["passed"] is True
+    assert cov["metric"] == 1.0
+    assert cov["reference_all_data"]["metric"] == pytest.approx(8 / 10)
+    assert cov["reference_all_data"]["passed"] is False
+    assert checks["intraday_symbol_coverage_ratio_min"]["reference_all_data"]["symbol"] == "P"
+    assert checks["intraday_volume_match_ratio"]["basis"] == "all_data"
+    assert "reference_all_data" not in checks["intraday_volume_match_ratio"]
+    assert rep["known_periods_excluded"] == 2 and rep["verdict_rule"]
+    assert isinstance(rep["passed"], bool) and rep["lock_waited_s"] == 0.0
+    assert rep["rows_written"] == 0
+
+
+def test_runner_without_known_periods_reports_same_numbers(spark, monkeypatch):
+    from stocklake.dq.notes import DqNotes
+
+    rep = _run_runner(spark, monkeypatch, DqNotes())
+    cov = next(c for c in rep["results"] if c["check_name"] == "intraday_day_coverage_ratio")
+    assert cov["basis"] == "excluding_known_periods" and rep["known_periods_excluded"] == 0
+    assert cov["metric"] == pytest.approx(8 / 10)
+    assert cov["reference_all_data"]["metric"] == cov["metric"]
+    assert cov["passed"] is False and rep["passed"] is False
+
+
+def test_runner_waits_for_executors_before_taking_read_locks(spark, monkeypatch):
+    """Có executor rồi mới xin khoá đọc (tránh chờ vòng khoá <-> core với job clean)."""
+    pytest.importorskip("stocklake.common.locks", reason="module khoá chưa có")
+    from stocklake.common import locks
+    from stocklake.dq import intraday as dq
+    from stocklake.dq.notes import DqNotes
+
+    events = []
+    real_wait, real_read_lock = dq.wait_for_executors, locks.read_lock
+
+    def wait(spark_):
+        events.append("executors")
+        real_wait(spark_)
+
+    def read_lock(fs, name, **kw):
+        events.append(name)
+        return real_read_lock(fs, name, **kw)
+
+    monkeypatch.setattr(dq, "wait_for_executors", wait)
+    monkeypatch.setattr(locks, "read_lock", read_lock)
+    _run_runner(spark, monkeypatch, DqNotes())
+    assert events == ["executors", dq.LOCK_INTRADAY, dq.LOCK_DAILY]

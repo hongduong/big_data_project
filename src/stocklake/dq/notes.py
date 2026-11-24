@@ -1,7 +1,7 @@
 """Ghi chú riêng cho DQ nến phút (conf/app/dq_notes.yaml): giai đoạn và ngày bất thường đã biết.
 
 Ghi chú là DỮ LIỆU, không lọc gì ở raw/clean. Runner dùng chúng để:
-- tính thêm khối metric `excluding_known_periods` (bỏ các giai đoạn đã biết);
+- tính bộ số bỏ các giai đoạn đã biết, dùng làm kết luận đạt/không đạt (stocklake.dq.verdict);
 - gắn `note` vào các dòng xấu nhất rơi vào giai đoạn / ngày đã biết.
 Python thuần, không import pyspark.
 """
