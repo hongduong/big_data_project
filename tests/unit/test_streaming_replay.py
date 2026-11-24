@@ -1,6 +1,8 @@
 import ast
 import json
-from datetime import date, datetime, timezone
+import logging
+import threading
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -11,17 +13,23 @@ from stocklake.streaming.producers.base import serialize
 from stocklake.streaming.producers.replay import (
     HdfsHistory,
     HistoryUnavailableError,
+    ListChunk,
+    MonthWindow,
     Pacer,
     ReplayBar,
     bar_to_message,
-    day_filters,
+    bar_ts_filters,
     dedup_sort,
     encode_message,
+    history_paths,
     last_trade_dates,
     merge_bars,
+    month_windows,
+    parse_sources,
     publish_bars,
     replay,
     run_replay,
+    vn_date_of_ms,
     vn_day_bounds,
     weekdays,
 )
@@ -158,6 +166,8 @@ def test_publish_counts_and_rate():
     assert (res.sent, res.delivered, res.failed) == (3000, 3000, 0)
     assert res.seconds == pytest.approx(1.5, rel=0.03)
     assert res.first_bar_ts == T0 and res.last_bar_ts == T0 + 1499 * 60_000
+    assert res.target_rate == 2000
+    assert res.achieved_rate == pytest.approx(2000, rel=0.03)
     msgs = [json.loads(v) for _, _, v in prod.sent]
     assert all(m["replay_run_id"] == "r1" and m["source"] == "replay" for m in msgs)
     assert [m["bar_ts"] for m in msgs] == sorted(m["bar_ts"] for m in msgs)
@@ -191,31 +201,7 @@ def test_publish_counts_unflushed_as_failed():
     assert (res.sent, res.delivered, res.failed) == (5, 0, 5)
 
 
-# ------------------------------------------------------------------ chọn ngày, filter, gộp
-
-
-def _day_bars(day: date, symbols=("FPT", "VNM"), n=10) -> list[ReplayBar]:
-    lo, _ = vn_day_bounds(day, day)
-    start = int(lo.timestamp() * 1000) + 9 * 3_600_000
-    out = []
-    for sym in symbols:
-        out += _bars(sym, n, start=start)
-    return dedup_sort((b, "vci") for b in out)
-
-
-class FakeHistory:
-    """Lịch sử giả: {ngày: nến}; ghi lại các lần đọc."""
-
-    def __init__(self, days: dict[date, list[ReplayBar]]):
-        self.days = days
-        self.reads: list[date] = []
-
-    def read_day(self, symbols, day):
-        self.reads.append(day)
-        return [b for b in self.days.get(day, []) if b.symbol in symbols]
-
-    def read_year_dates(self, symbols, year):
-        return {d for d, bars in self.days.items() if d.year == year and bars}
+# ------------------------------------------------------------------ cửa sổ tháng, đường dẫn
 
 
 def test_vn_day_bounds_utc():
@@ -225,22 +211,43 @@ def test_vn_day_bounds_utc():
     assert lo.tzinfo is not None  # aware: khớp cột timestamp có tz
 
 
-def test_day_filters_output():
-    f = day_filters(["VNM", "FPT", "FPT"], date(2026, 11, 20))
-    assert f == [
-        ("year", "=", 2026),
-        ("symbol", "in", ["FPT", "VNM"]),
-        ("bar_ts", ">=", datetime(2026, 11, 19, 17, 0, tzinfo=UTC)),
-        ("bar_ts", "<", datetime(2026, 11, 20, 17, 0, tzinfo=UTC)),
+def test_month_windows_year_boundary_and_clipping():
+    w = month_windows(date(2025, 12, 15), date(2026, 1, 10))
+    assert w == [
+        MonthWindow(2025, 12, datetime(2025, 12, 14, 17, tzinfo=UTC),
+                    datetime(2025, 12, 31, 17, tzinfo=UTC)),
+        MonthWindow(2026, 1, datetime(2025, 12, 31, 17, tzinfo=UTC),
+                    datetime(2026, 1, 10, 17, tzinfo=UTC)),
+    ]  # fmt: skip
+    # Tháng giữa không bị cắt; 01/01 VN bắt đầu từ 31/12 17:00 UTC.
+    mid = month_windows(date(2025, 11, 30), date(2026, 2, 2))
+    assert [(x.year, x.month) for x in mid] == [(2025, 11), (2025, 12), (2026, 1), (2026, 2)]
+    assert mid[2].lo == datetime(2025, 12, 31, 17, tzinfo=UTC)
+    assert mid[2].hi == datetime(2026, 1, 31, 17, tzinfo=UTC)
+    assert mid[0].lo == datetime(2025, 11, 29, 17, tzinfo=UTC)
+    # Cửa sổ liền nhau, không chồng, không hở.
+    assert all(a.hi == b.lo for a, b in zip(mid, mid[1:], strict=False))
+    one = month_windows(date(2026, 11, 20), date(2026, 11, 20))
+    assert one == [MonthWindow(2026, 11, *vn_day_bounds(date(2026, 11, 20), date(2026, 11, 20)))]
+
+
+def test_history_paths_and_sources():
+    root = "/data/raw/intraday_history/"
+    assert history_paths(root, "vci", 2026, ["VNM", "FPT", "FPT"]) == [
+        "/data/raw/intraday_history/source=vci/year=2026/FPT.parquet",
+        "/data/raw/intraday_history/source=vci/year=2026/VNM.parquet",
     ]
-    assert isinstance(f[0][2], int)
+    entries = ["/r/source=vndirect", "/r/_SUCCESS", "/r/source=vci", "/r/source=kbs"]
+    assert parse_sources(entries) == ["vci", "kbs", "vndirect"]
+    assert parse_sources(["/r/_x"]) == []
 
 
-def test_day_filters_year_is_vn_year():
-    # 01/01 VN bắt đầu từ 31/12 17:00 UTC nhưng year vẫn là năm VN.
-    f = day_filters(["FPT"], date(2027, 1, 1))
-    assert f[0] == ("year", "=", 2027)
-    assert f[2][2] == datetime(2026, 12, 31, 17, 0, tzinfo=UTC)
+def test_bar_ts_filters_are_aware():
+    lo, hi = vn_day_bounds(date(2027, 1, 1), date(2027, 1, 1))
+    f = bar_ts_filters(lo, hi)
+    assert f == [("bar_ts", ">=", datetime(2026, 12, 31, 17, tzinfo=UTC)),
+                 ("bar_ts", "<", datetime(2027, 1, 1, 17, tzinfo=UTC))]  # fmt: skip
+    assert f[0][2].tzinfo is not None
 
 
 def test_weekdays_skips_weekend():
@@ -261,108 +268,254 @@ def test_dedup_prefers_vci_and_orders():
     assert dedup_sort([(a, "vci"), (b, "vndirect")]) == [a]
 
 
-def test_last_trade_dates_from_fake_history():
-    h = FakeHistory({date(2026, 11, d): [object()] for d in (16, 17, 18, 19, 20, 23)})
-    h.days[date(2025, 12, 30)] = [object()]
-    got = last_trade_dates(h.read_year_dates, ["FPT"], 3, today=date(2026, 11, 24))
+def test_chunk_slices_days_in_vietnam_time():
+    ms = lambda dt: int(dt.timestamp() * 1000)  # noqa: E731
+    edge = ms(datetime(2025, 12, 31, 17, 0, tzinfo=UTC))  # 01/01/2026 00:00 VN
+    before = edge - 60_000  # 31/12/2025 23:59 VN
+    assert vn_date_of_ms(edge) == date(2026, 1, 1)
+    assert vn_date_of_ms(before) == date(2025, 12, 31)
+    bars = [ReplayBar("FPT", t, 1, 1, 1, 1, 1) for t in (edge + 60_000, before, edge)]
+    chunk = ListChunk([(b, "vci") for b in bars])
+    assert chunk.dates() == [date(2025, 12, 31), date(2026, 1, 1)]
+    assert [b.bar_ts for b, _ in chunk.day_rows(date(2026, 1, 1))] == [edge + 60_000, edge]
+    assert chunk.day_rows(date(2026, 1, 2)) == []
+
+
+# ------------------------------------------------------------------ lịch sử giả (theo tháng)
+
+
+def _day_bars(day: date, symbols=("FPT", "VNM"), n=10) -> list[ReplayBar]:
+    lo, _ = vn_day_bounds(day, day)
+    start = int(lo.timestamp() * 1000) + 9 * 3_600_000
+    out = []
+    for sym in symbols:
+        out += _bars(sym, n, start=start)
+    return dedup_sort((b, "vci") for b in out)
+
+
+def _in(b: ReplayBar, lo: datetime, hi: datetime) -> bool:
+    return lo <= datetime.fromtimestamp(b.bar_ts / 1000, UTC) < hi
+
+
+class FakeHistory:
+    """Lịch sử giả {ngày: nến}; ghi lại các lần đọc tháng (thread-safe nhờ list.append)."""
+
+    def __init__(self, days: dict[date, list[ReplayBar]]):
+        self.days = days
+        self.month_reads: list[tuple[int, int]] = []
+        self.date_reads: list[tuple[int, int]] = []
+
+    def _bars(self, symbols, lo, hi):
+        return [b for bars in self.days.values() for b in bars if b.symbol in symbols
+                and _in(b, lo, hi)]  # fmt: skip
+
+    def read_month(self, symbols, year, month, lo, hi):
+        self.month_reads.append((year, month))
+        return ListChunk((b, "vci") for b in self._bars(symbols, lo, hi))
+
+    def read_month_dates(self, symbols, year, month, lo, hi):
+        self.date_reads.append((year, month))
+        return {vn_date_of_ms(b.bar_ts) for b in self._bars(symbols, lo, hi)}
+
+
+D_OCT, D_NOV, D_DEC = date(2026, 10, 15), date(2026, 11, 19), date(2026, 12, 17)
+SYMS = ["FPT", "VNM"]
+
+
+def _three_months() -> FakeHistory:
+    return FakeHistory({d: _day_bars(d) for d in (D_OCT, D_NOV, D_DEC)})
+
+
+def _alive_readers() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name == "replay-reader" and t.is_alive()]
+
+
+# ------------------------------------------------------------------ --days dò sớm dừng
+
+
+def test_last_trade_dates_stops_early_and_goes_back_across_year():
+    nov = [date(2026, 11, d) for d in (16, 17, 18, 19, 20, 23)]
+    h = FakeHistory({d: _day_bars(d) for d in nov})
+    h.days[date(2025, 12, 30)] = _day_bars(date(2025, 12, 30))
+    got = last_trade_dates(h.read_month_dates, SYMS, 3, today=date(2026, 11, 24))
     assert got == [date(2026, 11, 19), date(2026, 11, 20), date(2026, 11, 23)]
-    # Thiếu trong năm nay -> lùi sang năm trước.
-    got = last_trade_dates(h.read_year_dates, ["FPT"], 7, today=date(2026, 11, 24))
+    assert h.date_reads == [(2026, 11)]  # đủ ngay ở tháng đầu: không đọc tháng trước
+    h.date_reads.clear()
+    got = last_trade_dates(h.read_month_dates, SYMS, 7, today=date(2026, 11, 24))
     assert got[0] == date(2025, 12, 30) and len(got) == 7
-    # Ít hơn N: trả những gì có.
-    assert len(last_trade_dates(h.read_year_dates, ["FPT"], 50, today=date(2026, 11, 24))) == 7
+    assert h.date_reads[0] == (2026, 11) and h.date_reads[-1] == (2025, 12)
+    assert len(h.date_reads) == 12  # lùi từng tháng 11/2026 -> 12/2025 rồi dừng
+    # Ít hơn N: trả những gì có (dò tới tháng sớm nhất).
+    assert len(last_trade_dates(h.read_month_dates, SYMS, 50, today=date(2026, 11, 24))) == 7
     with pytest.raises(HistoryUnavailableError):
-        last_trade_dates(lambda s, y: set(), ["FPT"], 3, today=date(2026, 11, 24))
+        last_trade_dates(lambda *a: set(), SYMS, 3, today=date(2026, 11, 24))
     with pytest.raises(ValueError):
-        last_trade_dates(h.read_year_dates, ["FPT"], 0)
+        last_trade_dates(h.read_month_dates, SYMS, 0)
 
 
-# ------------------------------------------------------------------ replay nhiều ngày
+# ------------------------------------------------------------------ replay nhiều tháng
 
 
-def test_replay_days_order_pacing_and_result():
-    d1, d2, d3 = date(2026, 11, 19), date(2026, 11, 20), date(2026, 11, 23)
-    hist = FakeHistory({d1: _day_bars(d1), d3: _day_bars(d3)})  # d2 không có nến
-    clock = FakeClock()
-    prod = FakeProducer(clock=clock, per_msg_s=5e-6)
+def _run(hist, start, end, *, rate=10, prefetch=True, producer=None, clock=None):
+    clock = clock or FakeClock()
+    prod = producer or FakeProducer(clock=clock, per_msg_s=5e-6)
     res = replay(
-        ["FPT", "VNM"], [d1, d2, d3], rate=10, run_id="rX", read_day=hist.read_day,
-        producer=prod, clock=clock, sleep=clock.sleep,
+        SYMS, start, end, rate=rate, run_id="rX", read_month=hist.read_month, producer=prod,
+        clock=clock, sleep=clock.sleep, prefetch=prefetch,
     )  # fmt: skip
-    assert hist.reads == [d1, d2, d3]  # từng ngày một
-    assert (res.sent, res.delivered, res.failed) == (40, 40, 0)
-    assert (res.days, res.symbols, res.run_id) == (2, 2, "rX")
-    # Nhịp liên tục qua ranh giới ngày: 40 bản tin ở 10 msg/s ~ 4 s, không reset theo ngày.
-    assert res.seconds == pytest.approx(4.0, rel=0.05)
+    return res, prod
+
+
+@pytest.mark.parametrize("prefetch", [True, False])
+def test_replay_months_order_pacing_and_result(prefetch):
+    hist = _three_months()
+    hist.days[date(2026, 11, 20)] = []  # ngày rỗng bị bỏ qua
+    res, prod = _run(hist, date(2026, 10, 1), date(2026, 12, 31), prefetch=prefetch)
+    assert sorted(hist.month_reads) == [(2026, 10), (2026, 11), (2026, 12)]
+    assert (res.sent, res.delivered, res.failed) == (60, 60, 0)
+    assert (res.days, res.symbols, res.run_id, res.months) == (3, 2, "rX", 3)
+    # Nhịp liên tục qua ranh giới tháng: 60 bản tin ở 10 msg/s ~ 6 s, không reset theo tháng.
+    assert res.seconds == pytest.approx(6.0, rel=0.05)
+    assert res.target_rate == 10 and res.achieved_rate == pytest.approx(10, rel=0.1)
+    assert res.read_seconds >= 0
     msgs = [json.loads(v) for _, _, v in prod.sent]
     keys = [(m["bar_ts"], m["symbol"]) for m in msgs]
-    assert keys[:20] == sorted(keys[:20]) and keys[20:] == sorted(keys[20:])
-    assert max(k[0] for k in keys[:20]) < min(k[0] for k in keys[20:])
+    for k in (0, 20, 40):
+        assert keys[k : k + 20] == sorted(keys[k : k + 20])
+    assert keys[19][0] < keys[20][0] and keys[39][0] < keys[40][0]
     assert {m["replay_run_id"] for m in msgs} == {"rX"}
     assert all(m["source"] == "replay" for m in msgs)
     out = json.loads(res.to_json())
-    assert {"run_id", "sent", "delivered", "failed", "days", "symbols"} <= set(out)
+    expected = (
+        "run_id sent delivered failed seconds first_bar_ts last_bar_ts days symbols "
+        "target_rate achieved_rate read_seconds months"
+    ).split()
+    assert set(expected) <= set(out)
+    assert not _alive_readers()
 
 
-def test_replay_reads_lazily_one_day_at_a_time():
-    d1, d2 = date(2026, 11, 19), date(2026, 11, 20)
-    hist = FakeHistory({d1: _day_bars(d1), d2: _day_bars(d2)})
-    seen_at_send: list[int] = []
+def test_replay_clips_to_range_and_reads_only_needed_months():
+    hist = _three_months()
+    res, _ = _run(hist, D_NOV, D_NOV, rate=1000)
+    assert hist.month_reads == [(2026, 11)]
+    assert (res.sent, res.days, res.months) == (20, 1, 1)
+
+
+def test_prefetch_reads_next_month_while_sending_current():
+    hist = _three_months()
+    started = {m: threading.Event() for m in (10, 11, 12)}
+    inner = hist.read_month
+    first_send: list[tuple[int, bool]] = []
+
+    def read_month(symbols, year, month, lo, hi):
+        started[month].set()
+        return inner(symbols, year, month, lo, hi)
 
     class Spy(FakeProducer):
+        n = 0
+
         def produce(self, *a, **k):
-            seen_at_send.append(len(hist.reads))
+            Spy.n += 1
+            if Spy.n == 1:  # chunk tháng đầu đã có trước bản tin đầu tiên
+                first_send.append((10, started[10].is_set()))
+            if Spy.n == 3:  # còn đang gửi tháng 10: tháng 11 phải đã/đang được đọc nền
+                first_send.append((11, started[11].wait(5)))
             super().produce(*a, **k)
 
     clock = FakeClock()
-    replay(["FPT", "VNM"], [d1, d2], rate=1000, read_day=hist.read_day, producer=Spy(),
-           clock=clock, sleep=clock.sleep)  # fmt: skip
-    assert seen_at_send[0] == 1 and seen_at_send[-1] == 2  # ngày 2 chỉ đọc sau khi hết ngày 1
+    res = replay(SYMS, date(2026, 10, 1), date(2026, 12, 31), rate=1000, read_month=read_month,
+                 producer=Spy(clock=clock), clock=clock, sleep=clock.sleep)  # fmt: skip
+    assert first_send == [(10, True), (11, True)]
+    assert res.sent == 60 and not _alive_readers()
+
+
+def test_sync_mode_reads_month_only_when_needed():
+    hist = _three_months()
+    seen: list[int] = []
+
+    class Spy(FakeProducer):
+        def produce(self, *a, **k):
+            seen.append(len(hist.month_reads))
+            super().produce(*a, **k)
+
+    clock = FakeClock()
+    replay(SYMS, date(2026, 10, 1), date(2026, 12, 31), rate=1000, read_month=hist.read_month,
+           producer=Spy(), clock=clock, sleep=clock.sleep, prefetch=False)  # fmt: skip
+    assert seen[0] == 1 and seen[-1] == 3 and seen == sorted(seen)
+
+
+def test_reader_exception_propagates_and_thread_stops():
+    hist = _three_months()
+
+    def read_month(symbols, year, month, lo, hi):
+        if month == 11:
+            raise OSError("webhdfs down")
+        return hist.read_month(symbols, year, month, lo, hi)
+
+    clock = FakeClock()
+    prod = FakeProducer(clock=clock)
+    with pytest.raises(OSError, match="webhdfs down"):
+        replay(SYMS, date(2026, 10, 1), date(2026, 12, 31), rate=1000, read_month=read_month,
+               producer=prod, clock=clock, sleep=clock.sleep)  # fmt: skip
+    assert len(prod.sent) + len(prod.queue) == 20  # tháng 10 đã gửi trước khi lỗi tới
+    assert not _alive_readers()
+
+
+def test_reader_exception_in_first_month_raises_before_producer():
+    def read_month(*a):
+        raise OSError("boom")
+
+    with pytest.raises(OSError, match="boom"):
+        replay(
+            SYMS, date(2026, 10, 1), date(2026, 10, 31), read_month=read_month, producer=object()
+        )
+    assert not _alive_readers()
+
+
+def test_sender_error_stops_blocked_reader():
+    hist = FakeHistory({d: _day_bars(d) for d in (D_OCT, D_NOV, D_DEC, date(2027, 1, 14))})
+
+    class Boom(FakeProducer):
+        def produce(self, *a, **k):
+            raise RuntimeError("kafka down")
+
+    clock = FakeClock()
+    with pytest.raises(RuntimeError, match="kafka down"):
+        replay(SYMS, date(2026, 10, 1), date(2027, 1, 31), rate=1000, read_month=hist.read_month,
+               producer=Boom(), clock=clock, sleep=clock.sleep)  # fmt: skip
+    assert not _alive_readers()  # luồng đọc có thể đang kẹt ở put() hàng đợi đầy
 
 
 def test_replay_no_bars_raises_before_producer():
     hist = FakeHistory({})
     with pytest.raises(HistoryUnavailableError, match="intraday_history.py"):
-        replay(["FPT"], [date(2026, 11, 20)], read_day=hist.read_day, producer=object())
+        replay(SYMS, date(2026, 11, 20), date(2026, 11, 20), read_month=hist.read_month,
+               producer=object())  # fmt: skip
+    assert not _alive_readers()
 
 
-def test_hdfs_history_missing_table_message():
-    class NoFs:
-        def exists(self, path):
-            return False
-
-    pytest.importorskip("pyarrow")
-    with pytest.raises(HistoryUnavailableError, match="intraday_history.py"):
-        HdfsHistory(fs=NoFs()).read_day(["FPT"], date(2026, 11, 20))
-
-
-def test_table_helpers_with_pyarrow():
-    pa = pytest.importorskip("pyarrow")
-    from stocklake.streaming.producers.replay import table_to_rows, table_to_trade_dates
-
-    utc = timezone.utc
-    # 2026-11-20 16:59 UTC = 2026-11-20 23:59 VN; 17:00 UTC = 2026-11-21 00:00 VN
-    ts = [datetime(2026, 11, 20, 2, 15, tzinfo=utc), datetime(2026, 11, 20, 16, 59, tzinfo=utc),
-          datetime(2026, 11, 20, 17, 0, tzinfo=utc)]  # fmt: skip
-    t = pa.table({
-        "symbol": ["FPT"] * 3, "bar_ts": pa.array(ts, pa.timestamp("us", tz="UTC")),
-        "open": [1.0] * 3, "high": [1.0] * 3, "low": [1.0] * 3, "close": [1.0] * 3,
-        "volume": pa.array([10, 20, 30], pa.int64()), "source": ["vci"] * 3,
-    })  # fmt: skip
-    assert table_to_trade_dates(t) == {date(2026, 11, 20), date(2026, 11, 21)}
-    rows = table_to_rows(t)
-    assert rows[0][0].bar_ts == int(ts[0].timestamp() * 1000) and rows[0][1] == "vci"
-    assert table_to_trade_dates(t.slice(0, 0)) == set()
+def test_warns_when_below_target_rate(caplog):
+    hist = FakeHistory({D_NOV: _day_bars(D_NOV, n=2000)})
+    clock = FakeClock()
+    prod = FakeProducer(clock=clock, per_msg_s=0.001)  # gửi chậm: ~1000 msg/s < 95% của 2000
+    with caplog.at_level(logging.WARNING):
+        res = replay(SYMS, D_NOV, D_NOV, rate=2000, read_month=hist.read_month, producer=prod,
+                     clock=clock, sleep=clock.sleep)  # fmt: skip
+    assert res.achieved_rate < 0.95 * res.target_rate
+    assert any(
+        r.levelno == logging.WARNING and "mục tiêu" in r.getMessage() for r in caplog.records
+    )
 
 
-def test_replay_with_days_selected_from_history():
-    ds = [date(2026, 11, d) for d in (17, 18, 19, 20)]
+def test_run_replay_days_selects_range_from_history():
+    today = datetime.now(UTC).astimezone(replay_mod.VN_TZ).date()
+    ds = weekdays(today - timedelta(days=9), today)[-4:]
     hist = FakeHistory({d: _day_bars(d) for d in ds})
     clock = FakeClock()
-    chosen = last_trade_dates(hist.read_year_dates, ["FPT"], 2, today=date(2026, 11, 24))
-    res = replay(["FPT", "VNM"], chosen, rate=1000, read_day=hist.read_day,
-                 producer=FakeProducer(clock=clock), clock=clock, sleep=clock.sleep)  # fmt: skip
-    assert chosen == ds[-2:] and res.days == 2 and res.sent == 40
+    res = run_replay(SYMS, days=2, rate=100000, history=hist, prefetch=False,
+                     producer=FakeProducer(clock=clock))  # fmt: skip
+    assert res.days == 2 and res.sent == 40
+    assert hist.date_reads[0] == (today.year, today.month)
 
 
 def test_run_replay_start_end_rejects_partial_and_reversed():
@@ -373,11 +526,95 @@ def test_run_replay_start_end_rejects_partial_and_reversed():
                    history=FakeHistory({}))  # fmt: skip
 
 
-def test_run_replay_start_end_reads_weekdays_only():
+def test_run_replay_start_end_reads_months_in_range():
     hist = FakeHistory({})
     with pytest.raises(HistoryUnavailableError):
-        run_replay(["FPT"], start=date(2026, 11, 20), end=date(2026, 11, 23), history=hist)
-    assert hist.reads == [date(2026, 11, 20), date(2026, 11, 23)]
+        run_replay(["FPT"], start=date(2026, 11, 20), end=date(2026, 12, 3), history=hist)
+    assert sorted(hist.month_reads) == [(2026, 11), (2026, 12)]
+
+
+# ------------------------------------------------------------------ HDFS (fake fs / pyarrow)
+
+
+def test_hdfs_history_missing_table_message():
+    class NoFs:
+        def ls(self, path, detail=False):
+            raise FileNotFoundError(path)
+
+    with pytest.raises(HistoryUnavailableError, match="intraday_history.py"):
+        HdfsHistory(fs=NoFs()).read_month(["FPT"], 2026, 11, *vn_day_bounds(D_NOV, D_NOV))
+
+
+def test_hdfs_history_reads_explicit_paths_once_per_source(monkeypatch):
+    pytest.importorskip("pyarrow")
+    import pyarrow as pa
+
+    from stocklake.common import hdfs
+
+    calls = []
+    lo, hi = vn_day_bounds(D_NOV, D_NOV)
+    ts = [datetime(2026, 11, 19, 2, 15, tzinfo=UTC), datetime(2026, 11, 19, 2, 16, tzinfo=UTC)]
+
+    def fake_read(paths, columns=None, filters=None, fs=None, missing_ok=True):
+        calls.append((list(paths), columns, filters))
+        px = 100.0 if "source=vci" in paths[0] else 200.0
+        return pa.table({
+            "symbol": ["FPT", "FPT"], "bar_ts": pa.array(ts, pa.timestamp("us", tz="UTC")),
+            "open": [px] * 2, "high": [px] * 2, "low": [px] * 2, "close": [px] * 2,
+            "volume": pa.array([1, 2], pa.int64()),
+        })  # fmt: skip
+
+    class Fs:
+        ls_calls = 0
+
+        def ls(self, path, detail=False):
+            Fs.ls_calls += 1
+            return [f"{path}/source=vndirect", f"{path}/source=vci", f"{path}/_SUCCESS"]
+
+    monkeypatch.setattr(hdfs, "read_parquet_files", fake_read, raising=False)
+    h = HdfsHistory(fs=Fs())
+    chunk = h.read_month(["VNM", "FPT"], 2026, 11, lo, hi)
+    h.read_month(["FPT"], 2026, 11, lo, hi)
+    assert Fs.ls_calls == 1  # nguồn dò một lần
+    base = "/data/raw/intraday_history"
+    assert calls[0] == (
+        [f"{base}/source=vci/year=2026/FPT.parquet", f"{base}/source=vci/year=2026/VNM.parquet"],
+        ["symbol", "bar_ts", "open", "high", "low", "close", "volume"],
+        bar_ts_filters(lo, hi),
+    )
+    assert calls[1][0][0].startswith(f"{base}/source=vndirect/")
+    assert chunk.dates() == [D_NOV]
+    assert [b.open for b in dedup_sort(chunk.day_rows(D_NOV))] == [100.0, 100.0]  # ưu tiên vci
+
+
+def test_table_helpers_with_pyarrow():
+    pa = pytest.importorskip("pyarrow")
+    from stocklake.streaming.producers.replay import (
+        ArrowChunk,
+        split_by_vn_day,
+        table_to_rows,
+        table_to_trade_dates,
+    )
+
+    # 2026-11-20 16:59 UTC = 2026-11-20 23:59 VN; 17:00 UTC = 2026-11-21 00:00 VN
+    ts = [datetime(2026, 11, 20, 17, 0, tzinfo=UTC), datetime(2026, 11, 20, 2, 15, tzinfo=UTC),
+          datetime(2026, 11, 20, 16, 59, tzinfo=UTC)]  # fmt: skip
+    t = pa.table({
+        "symbol": ["FPT"] * 3, "bar_ts": pa.array(ts, pa.timestamp("us", tz="UTC")),
+        "open": [1.0] * 3, "high": [1.0] * 3, "low": [1.0] * 3, "close": [1.0] * 3,
+        "volume": pa.array([10, 20, 30], pa.int64()),
+    })  # fmt: skip
+    assert table_to_trade_dates(t) == {date(2026, 11, 20), date(2026, 11, 21)}
+    rows = table_to_rows(t, "vci")
+    assert rows[0][0].bar_ts == int(ts[0].timestamp() * 1000) and rows[0][1] == "vci"
+    assert table_to_trade_dates(t.slice(0, 0)) == set()
+    days = split_by_vn_day(t)
+    assert [d for d, _ in days] == [date(2026, 11, 20), date(2026, 11, 21)]
+    assert [p.num_rows for _, p in days] == [2, 1]
+    chunk = ArrowChunk([("vci", t)])
+    assert chunk.dates() == [date(2026, 11, 20), date(2026, 11, 21)]
+    day1 = chunk.day_rows(date(2026, 11, 20))
+    assert [b.bar_ts for b, _ in day1] == sorted(b.bar_ts for b, _ in day1)
 
 
 # ------------------------------------------------------------------ ranh giới module
