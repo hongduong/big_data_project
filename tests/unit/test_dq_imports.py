@@ -11,6 +11,7 @@ def test_dq_imports_without_pyspark():
     code = (
         "import sys\n"
         "import stocklake.dq, stocklake.dq.checks, stocklake.dq.report, stocklake.dq.intraday\n"
+        "import stocklake.dq.notes\n"
         "import stocklake.dq.checks.intraday_completeness, stocklake.dq.checks.intraday_volume\n"
         "bad = [m for m in ('pyspark', 'pyarrow', 'fsspec') if m in sys.modules]\n"
         "assert not bad, bad\n"

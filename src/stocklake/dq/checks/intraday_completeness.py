@@ -14,13 +14,18 @@ from stocklake.dq.checks import CheckGroup, CheckResult
 from stocklake.dq.checks._util import quantiles
 
 if TYPE_CHECKING:
-    from pyspark.sql import DataFrame
+    from pyspark.sql import Column, DataFrame
+
+    from stocklake.dq.notes import KnownPeriod
 
 TABLE_NAME = "intraday_1m"
 GROUP = CheckGroup.COMPLETENESS
-# Ngưỡng tạm, chưa hiệu chỉnh: phải chỉnh lại theo số đo thật (xem bars_per_day_distribution).
-DEFAULT_MIN_BARS_PER_DAY = 30
-DEFAULT_MIN_COVERAGE_RATIO = 0.99
+# Ngưỡng mặc định (duyệt 24/11/2026, đo trên VN30). Các hàm nhận tham số để ghi đè.
+DEFAULT_MIN_COVERAGE_RATIO = 0.998  # tỉ lệ (mã, ngày) kỳ vọng có >= 1 nến, toàn bộ
+DEFAULT_MIN_SYMBOL_COVERAGE_RATIO = 0.98  # cùng tỉ lệ đó, cho từng mã
+DEFAULT_MIN_BARS_PER_DAY = 100  # ngày có dữ liệu mà < 100 nến là ngày mỏng
+DEFAULT_MAX_THIN_DAY_SHARE = 0.01  # ngày mỏng <= 1% số (mã, ngày) có dữ liệu
+_VN_OFFSET_SECONDS = 7 * 3600
 
 
 def _d(v: date | str):
@@ -116,6 +121,107 @@ def intraday_days_outside_calendar(
     return per_day.join(F.broadcast(cal), per_day["trade_date"] == cal["cal_date"], "left_anti")
 
 
+# ------------------------------------------------------------ giai đoạn đã biết
+
+
+def period_condition(periods: Sequence[KnownPeriod]) -> Column:
+    """Điều kiện Spark: (symbol, trade_date) nằm trong một giai đoạn đã biết."""
+    from pyspark.sql import functions as F
+
+    cond = F.lit(False)
+    for p in periods:
+        c = F.col("symbol") == F.lit(p.symbol)
+        if p.start is not None:
+            c = c & (F.col("trade_date") >= _d(p.start))
+        if p.end is not None:
+            c = c & (F.col("trade_date") <= _d(p.end))
+        cond = cond | c
+    return cond
+
+
+def exclude_known_periods(coverage_df: DataFrame, periods: Sequence[KnownPeriod]) -> DataFrame:
+    """Bỏ các (mã, ngày) thuộc giai đoạn đã biết (gồm cả ngày trống) khỏi coverage."""
+    if not periods:
+        return coverage_df
+    return coverage_df.filter(~period_condition(periods))
+
+
+def known_period_stats(
+    coverage_df: DataFrame,
+    intraday_df: DataFrame,
+    periods: Sequence[KnownPeriod],
+    symbols: Sequence[str] | None = None,
+    start: date | str | None = None,
+    end: date | str | None = None,
+) -> list[dict[str, Any]]:
+    """Mỗi giai đoạn: số ngày kỳ vọng, phân phối nến/ngày, số nến ngoài 09:00–15:00 giờ VN.
+
+    Thêm số nến trước 09:15, trong giờ nghỉ trưa (11:30–13:00), sau 14:45 để so với mẫu HOSE.
+    """
+    from pyspark.sql import functions as F
+
+    bars = _bars(intraday_df, symbols)
+    if start is not None:
+        bars = bars.filter(F.col("trade_date") >= _d(start))
+    if end is not None:
+        bars = bars.filter(F.col("trade_date") <= _d(end))
+    m = (((F.col("bar_ts").cast("long") + _VN_OFFSET_SECONDS) % 86400) / 60).cast("int")
+    bars = bars.withColumn("m", m)  # phút trong ngày, giờ VN
+
+    def n(cond):
+        return F.sum(F.when(cond, 1).otherwise(0))
+
+    out = []
+    for p in periods:
+        cov = coverage_df.filter(period_condition([p]))
+        cnt = (
+            bars.filter(period_condition([p]))
+            .agg(
+                F.count(F.lit(1)).alias("bars"),
+                n((F.col("m") < 9 * 60) | (F.col("m") > 15 * 60)).alias("outside"),
+                n(F.col("m") < 9 * 60 + 15).alias("pre"),
+                n((F.col("m") > 11 * 60 + 30) & (F.col("m") < 13 * 60)).alias("lunch"),
+                n(F.col("m") > 14 * 60 + 45).alias("post"),
+            )
+            .collect()[0]
+        )
+        out.append(
+            {
+                "symbol": p.symbol,
+                "label": p.label,
+                "start": p.start.isoformat() if p.start else None,
+                "end": p.end.isoformat() if p.end else None,
+                "expected_days": cov.count(),
+                "bars_per_day": bars_per_day_distribution(cov),
+                "bars": int(cnt["bars"] or 0),
+                "bars_outside_0900_1500_vn": int(cnt["outside"] or 0),
+                "bars_before_0915_vn": int(cnt["pre"] or 0),
+                "bars_lunch_1130_1300_vn": int(cnt["lunch"] or 0),
+                "bars_after_1445_vn": int(cnt["post"] or 0),
+            }
+        )
+    return out
+
+
+# ------------------------------------------------------------ tổng hợp
+
+
+def symbol_coverage_min(coverage_df: DataFrame) -> tuple[str | None, float | None]:
+    """(mã, tỉ lệ ngày có nến / ngày kỳ vọng) của mã thấp nhất; hoà thì lấy mã đứng trước."""
+    from pyspark.sql import functions as F
+
+    rows = (
+        coverage_df.groupBy("symbol")
+        .agg((F.sum(F.col("has_data").cast("int")) / F.count(F.lit(1))).alias("r"))
+        .orderBy(F.col("r").asc(), "symbol")
+        .limit(1)
+        .collect()
+    )
+    if not rows:
+        return None, None
+    return rows[0]["symbol"], float(rows[0]["r"])
+
+
 def summarize_completeness(
     coverage_df: DataFrame,
     min_bars_per_day: int = DEFAULT_MIN_BARS_PER_DAY,
@@ -123,16 +229,22 @@ def summarize_completeness(
     min_coverage_ratio: float = DEFAULT_MIN_COVERAGE_RATIO,
     run_id: str = "adhoc",
     run_ts: datetime | None = None,
+    min_symbol_coverage_ratio: float = DEFAULT_MIN_SYMBOL_COVERAGE_RATIO,
+    max_thin_day_share: float = DEFAULT_MAX_THIN_DAY_SHARE,
+    suffix: str = "",
 ) -> list[CheckResult]:
-    """Các metric tổng hợp (table_name = intraday_1m).
+    """Các metric tổng hợp (table_name = intraday_1m); ngưỡng mặc định ở đầu module.
 
-    - intraday_day_coverage_ratio: tỉ lệ (mã, ngày) kỳ vọng có >= 1 nến; đạt khi >= ngưỡng
-      (mặc định 0.99, chưa hiệu chỉnh). Không có cặp nào để kiểm thì metric None, không đạt.
+    - intraday_day_coverage_ratio: tỉ lệ (mã, ngày) kỳ vọng có >= 1 nến; đạt khi
+      >= `min_coverage_ratio`. Không có cặp nào để kiểm thì metric None, không đạt.
+    - intraday_symbol_coverage_ratio_min: tỉ lệ đó của mã thấp nhất (mã nào: xem
+      `symbol_coverage_min`); đạt khi >= `min_symbol_coverage_ratio`.
     - intraday_days_missing: số (mã, ngày) kỳ vọng mà không có nến (chỉ đo, luôn đạt).
-    - intraday_thin_days: số ngày có dữ liệu nhưng < `min_bars_per_day` nến; đạt khi = 0.
-      `min_bars_per_day` mặc định 30 là mức lỏng tạm thời, PHẢI chỉnh theo số đo thật
-      (phân phối số nến/ngày) trước khi dùng làm kết luận.
+    - intraday_thin_days: số ngày có dữ liệu nhưng < `min_bars_per_day` nến (chỉ đo).
+    - intraday_thin_day_share: thin_days / số (mã, ngày) có dữ liệu; đạt khi
+      <= `max_thin_day_share`.
     - intraday_days_outside_calendar (nếu có `outside_df`): số (mã, ngày) có nến ngoài lịch.
+    `suffix` nối vào check_name (vd khối tính lại khi bỏ giai đoạn đã biết).
     """
     from pyspark.sql import functions as F
 
@@ -146,9 +258,11 @@ def summarize_completeness(
     ).collect()[0]
     expected, with_data, thin = (int(row[k] or 0) for k in ("expected", "with_data", "thin"))
     ratio = with_data / expected if expected else None
+    thin_share = thin / with_data if with_data else None
+    _, sym_min = symbol_coverage_min(coverage_df)
 
     def res(name: str, value: float | None, thr: float | None, ok: bool) -> CheckResult:
-        return CheckResult(run_id, TABLE_NAME, name, value, thr, ok, ts)
+        return CheckResult(run_id, TABLE_NAME, name + suffix, value, thr, ok, ts)
 
     results = [
         res(
@@ -157,8 +271,20 @@ def summarize_completeness(
             min_coverage_ratio,
             ratio is not None and ratio >= min_coverage_ratio,
         ),
+        res(
+            "intraday_symbol_coverage_ratio_min",
+            sym_min,
+            min_symbol_coverage_ratio,
+            sym_min is not None and sym_min >= min_symbol_coverage_ratio,
+        ),
         res("intraday_days_missing", float(expected - with_data), None, True),
-        res("intraday_thin_days", float(thin), 0.0, thin == 0),
+        res("intraday_thin_days", float(thin), None, True),
+        res(
+            "intraday_thin_day_share",
+            thin_share,
+            max_thin_day_share,
+            thin_share is not None and thin_share <= max_thin_day_share,
+        ),
     ]
     if outside_df is not None:
         n_out = outside_df.count()
@@ -206,7 +332,7 @@ def thinnest_days(coverage_df: DataFrame, limit: int = 10) -> DataFrame:
 
 
 def bars_per_day_distribution(coverage_df: DataFrame) -> dict[str, Any]:
-    """min/p5/p50/p95/max của n_bars trên các ngày có dữ liệu (dùng để chọn ngưỡng)."""
+    """min/p5/p50/p95/max của n_bars trên các ngày có dữ liệu."""
     from pyspark.sql import functions as F
 
     has = coverage_df.filter("has_data")

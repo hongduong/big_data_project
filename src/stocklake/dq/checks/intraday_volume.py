@@ -3,10 +3,9 @@
 Nhóm báo cáo: CROSS_SOURCE (nhóm gần nhất: đối chiếu chéo hai tập dữ liệu độc lập;
 không thêm thành viên enum mới).
 
-Lý do chênh lệch đã biết, cần điều tra khi đọc kết quả:
-- volume ngày của VCI là khối lượng khớp lệnh (không gồm thoả thuận), còn nến phút có thể
-  khác định nghĩa;
-- khối lượng phiên ATO/ATC có thể có hoặc không nằm trong nến phút;
+Lý do chênh lệch đã biết:
+- nến phút không gồm lô lẻ nên tổng volume phút <= volume ngày (đúng trên toàn bộ số đo VN30);
+  vì vậy ngày có volume phút > volume ngày là lỗi cứng;
 - phiên hôm nay chưa kết thúc nên nến phút chưa đủ.
 """
 
@@ -24,9 +23,10 @@ if TYPE_CHECKING:
 
 TABLE_NAME = "intraday_1m"
 GROUP = CheckGroup.CROSS_SOURCE
-# Ngưỡng tạm, chưa hiệu chỉnh: chọn lại từ volume_diff_distribution.
-DEFAULT_TOLERANCE = 0.05
-DEFAULT_MIN_MATCH_RATIO = 0.95
+# Ngưỡng mặc định (duyệt 24/11/2026, đo trên VN30). Các hàm nhận tham số để ghi đè.
+DEFAULT_TOLERANCE = 0.01  # |rel_diff| <= 1% là khớp
+DEFAULT_MIN_MATCH_RATIO = 0.99  # >= 99% ngày so sánh được phải khớp
+DEFAULT_MAX_DAYS_MINUTE_GT_DAILY = 0  # số ngày volume phút > volume ngày
 _SHARE_BUCKETS = (("0.1pct", 0.001), ("1pct", 0.01), ("5pct", 0.05), ("10pct", 0.1))
 
 
@@ -152,13 +152,15 @@ def summarize_volume(
     run_id: str = "adhoc",
     run_ts: datetime | None = None,
     distribution: dict[str, Any] | None = None,
+    max_days_minute_gt_daily: int = DEFAULT_MAX_DAYS_MINUTE_GT_DAILY,
 ) -> list[CheckResult]:
-    """Metric tổng hợp (table_name = intraday_1m).
+    """Metric tổng hợp (table_name = intraday_1m); ngưỡng mặc định ở đầu module.
 
-    `tolerance` (0.05) và `min_match_ratio` (0.95) là giá trị tạm, chưa hiệu chỉnh: chọn lại
-    từ `volume_diff_distribution`. Có thể truyền `distribution` đã tính để khỏi tính lại.
+    Có thể truyền `distribution` đã tính để khỏi tính lại.
     - intraday_volume_match_ratio: tỉ lệ ngày so sánh được có |rel_diff| <= tolerance;
       đạt khi >= min_match_ratio (không có ngày nào so sánh được thì không đạt).
+    - intraday_volume_days_minute_gt_daily: số ngày so sánh được có volume phút > volume ngày;
+      đạt khi <= max_days_minute_gt_daily (mặc định 0, kiểm cứng).
     - intraday_volume_days_no_daily: số ngày có nến nhưng thiếu/0 volume ngày (chỉ đo).
     - intraday_volume_abs_diff_p95: p95 của |rel_diff|; đạt khi <= tolerance.
     """
@@ -169,6 +171,7 @@ def summarize_volume(
     n = dist["days_comparable"]
     within = diff_df.filter(F.abs("rel_diff") <= tolerance).count() if n else 0
     ratio = within / n if n else None
+    gt = dist["days_minute_gt_daily"]
 
     def res(name: str, value: float | None, thr: float | None, ok: bool) -> CheckResult:
         return CheckResult(run_id, TABLE_NAME, name, value, thr, ok, ts)
@@ -179,6 +182,12 @@ def summarize_volume(
             ratio,
             min_match_ratio,
             ratio is not None and ratio >= min_match_ratio,
+        ),
+        res(
+            "intraday_volume_days_minute_gt_daily",
+            float(gt),
+            float(max_days_minute_gt_daily),
+            gt <= max_days_minute_gt_daily,
         ),
         res("intraday_volume_days_no_daily", float(dist["days_no_daily"]), None, True),
         res(
