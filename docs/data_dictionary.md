@@ -118,6 +118,27 @@ Chuỗi vĩ mô hằng ngày (yfinance, FRED)
 | `ingest_ts` | timestamp | không | Lúc ghi vào hệ thống (UTC) |
 | `available_at` | timestamp | không | Lúc dữ liệu được coi là đã biết (UTC) |
 
+## raw.intraday_history
+
+Lịch sử nến 1 phút tải batch bởi collector (không qua Kafka); year theo giờ VN
+
+- Khoá chính: `symbol`, `bar_ts`, `source`
+- Phân vùng: `source`, `year` (suy ra)
+
+| Cột | Kiểu | Null | Mô tả |
+|---|---|---|---|
+| `symbol` | string | không |  |
+| `bar_ts` | timestamp | không | Giờ mở nến (UTC) |
+| `open` | double | không |  |
+| `high` | double | không |  |
+| `low` | double | không |  |
+| `close` | double | không |  |
+| `volume` | long | không |  |
+| `source` | string | không | Nguồn dữ liệu |
+| `ingest_ts` | timestamp | không | Lúc ghi vào hệ thống (UTC) |
+| `available_at` | timestamp | không | Lúc dữ liệu được coi là đã biết (UTC) |
+| `ingest_run_id` | string | không | Id lượt chạy collector đã ghi dòng này |
+
 ## raw.intraday_prices
 
 Nến 1 phút từ Kafka; cột thời gian đã đổi sang timestamp
