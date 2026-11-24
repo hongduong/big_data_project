@@ -317,12 +317,42 @@ def _fake_spark():
 
 
 def _locks():
+    """Module khoá với giao diện heartbeat; chưa có (đang chuyển giao) thì skip, không lỗi."""
+    import inspect
+
     try:
-        return pytest.importorskip(
+        locks = pytest.importorskip(
             "stocklake.common.locks", reason="stocklake.common.locks chưa có (agent khác đang thêm)"
         )
     except Exception as exc:  # noqa: BLE001 - module đang sửa dở
         pytest.skip(f"stocklake.common.locks import lỗi: {exc}")
+    params = inspect.signature(locks.write_lock).parameters
+    if "heartbeat" not in params or not hasattr(locks, "DEFAULT_WAIT_TIMEOUT_S"):
+        pytest.skip(
+            "stocklake.common.locks chưa có giao diện heartbeat/DEFAULT_* (đang chuyển giao)"
+        )
+    return locks
+
+
+def _heartbeat_threads():
+    import threading
+
+    return [t for t in threading.enumerate() if t.name.startswith("lock-heartbeat-")]
+
+
+def _assert_no_heartbeat_left():
+    for t in _heartbeat_threads():
+        t.join(2.0)
+    assert [t.name for t in _heartbeat_threads() if t.is_alive()] == []
+
+
+def _wait_until(cond, timeout_s=3.0):
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
 
 
 def test_clean_write_lock_acquires_and_releases():
@@ -335,7 +365,9 @@ def test_clean_write_lock_acquires_and_releases():
         held = [p for p in fs.files if p.endswith("writer.lock")]
         assert held == ["/locks/clean.intraday_1m/writer.lock"]
         assert json.loads(fs.files[held[0]])["owner"] == "job:app-1"
+        assert not h.lost
     assert fs.files == {}
+    _assert_no_heartbeat_left()
 
 
 def test_clean_write_lock_timeout_is_clear_error_and_body_not_run():
@@ -359,9 +391,80 @@ def test_clean_write_lock_disabled_and_body_errors_propagate():
     from stocklake.etl.raw_to_clean._common import clean_write_lock
 
     with clean_write_lock(_fake_spark(), "intraday_1m", False) as h:
-        assert h.waited_s == 0.0
+        assert h.waited_s == 0.0 and h.lost is False
     fs = locks.MemoryLockFs()
     with pytest.raises(locks.LockTimeout):  # LockTimeout từ thân không bị đổi thành lỗi khoá
         with clean_write_lock(_fake_spark(), "intraday_1m", fs):
             raise locks.LockTimeout("từ thân")
     assert fs.files == {}
+    _assert_no_heartbeat_left()
+
+
+def test_clean_write_lock_heartbeat_renews_during_long_write():
+    locks = _locks()
+    from stocklake.etl.raw_to_clean._common import clean_write_lock, report_lock_lost
+
+    fs = locks.MemoryLockFs()
+    result = {}
+    with clean_write_lock(
+        _fake_spark(), "intraday_1m", fs, ttl_s=0.3, heartbeat_interval_s=0.02
+    ) as h:
+        assert _wait_until(lambda: h.refreshes >= 2), "heartbeat không gia hạn"
+        assert _heartbeat_threads()
+    assert report_lock_lost(h, result) is False and result == {"lock_lost": False}
+    assert fs.files == {}
+    _assert_no_heartbeat_left()
+
+
+def test_lock_lost_during_write_is_reported_not_raised(caplog):
+    locks = _locks()
+    from stocklake.etl.raw_to_clean._common import clean_write_lock, report_lock_lost
+
+    fs = locks.MemoryLockFs()
+    result = {}
+    with clean_write_lock(
+        _fake_spark(), "intraday_1m", fs, ttl_s=0.3, heartbeat_interval_s=0.02
+    ) as h:
+        fs.delete(h.path)  # khoá bị xoá/chiếm giữa lúc ghi
+        assert _wait_until(lambda: h.lost), "heartbeat không phát hiện mất khoá"
+    with caplog.at_level("ERROR"):
+        assert report_lock_lost(h, result) is True
+    assert result["lock_lost"] is True
+    assert any(
+        r.levelname == "ERROR" and "clean.intraday_1m" in r.getMessage() for r in caplog.records
+    )
+    _assert_no_heartbeat_left()
+
+
+def test_lock_lost_while_acquiring_is_clear_error_and_body_not_run():
+    from unittest import mock
+
+    locks = _locks()
+    from stocklake.etl.raw_to_clean._common import clean_write_lock
+
+    def lost_on_acquire(*a, **k):
+        raise locks.LockLost("writer.lock bị chiếm")
+
+    ran = []
+    with mock.patch.object(locks, "write_lock", lost_on_acquire):
+        with pytest.raises(RuntimeError, match="clean.intraday_1m") as ei:
+            with clean_write_lock(_fake_spark(), "intraday_1m", locks.MemoryLockFs()):
+                ran.append(1)
+    assert ran == [] and not isinstance(ei.value, locks.LockLost)
+
+
+def test_report_lock_lost_without_lock():
+    from stocklake.etl.raw_to_clean._common import _NoLock, report_lock_lost
+
+    result = {}
+    assert report_lock_lost(_NoLock(), result) is False and result == {"lock_lost": False}
+    fake = SimpleNamespace(
+        lost=True, path="/locks/x/writer.lock", refreshes=1, last_refresh_error="e"
+    )
+    assert report_lock_lost(fake, result) is True and result["lock_lost"] is True
+
+
+def test_etl_has_no_own_lock_ttl():
+    from stocklake.etl.raw_to_clean import _common
+
+    assert not hasattr(_common, "LOCK_TTL_S") and not hasattr(_common, "refresh_quietly")

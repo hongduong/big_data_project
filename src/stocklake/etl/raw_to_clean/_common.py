@@ -17,12 +17,10 @@ log = get_logger(__name__)
 
 VN_TZ_OFFSET_SECONDS = 7 * 3600  # Việt Nam UTC+7, không có giờ mùa hè
 
-# Khoá ghi bảng clean (tên dùng chung với dq/dashboard).
+# Khoá ghi bảng clean (tên dùng chung với dq/dashboard). TTL/thời gian chờ lấy mặc định của
+# `stocklake.common.locks` (TTL ngắn + heartbeat gia hạn khi lệnh ghi còn chạy). Khoá chỉ giữ
+# quanh lệnh ghi Spark (+ ghi trạng thái), không quanh phần lập kế hoạch.
 LOCK_PREFIX = "clean."
-# TTL rộng: dựng lại toàn bộ VN30 ~40 s, đủ 412 mã ước vài phút; job chết thì khoá tự hết hạn
-# sau 30 phút. Khoá chỉ giữ quanh lệnh ghi Spark (+ ghi trạng thái), không quanh phần lập kế hoạch.
-LOCK_TTL_S = 1800.0
-LOCK_WAIT_S = 900.0
 
 
 def _contract_cols(df: DataFrame, schema: TableSchema, names: tuple[str, ...] | None = None):
@@ -204,56 +202,67 @@ def job_owner(spark: Any) -> str:
 class _NoLock:
     id = path = None
     waited_s = 0.0
-
-    def refresh(self) -> None:
-        pass
+    lost = False
+    refreshes = 0
+    last_refresh_error = None
 
 
 @contextmanager
 def clean_write_lock(
-    spark: Any,
-    table: str,
-    lock_fs: Any = None,
-    *,
-    ttl_s: float = LOCK_TTL_S,
-    wait_timeout_s: float = LOCK_WAIT_S,
-    **lock_kwargs: Any,
+    spark: Any, table: str, lock_fs: Any = None, **lock_kwargs: Any
 ) -> Iterator[Any]:
-    """Giữ khoá ghi `clean.<table>` quanh lệnh ghi.
+    """Giữ khoá ghi `clean.<table>` quanh lệnh ghi (heartbeat gia hạn trong lúc giữ).
 
     `lock_fs`: None -> `hadoop_fs(spark)`; False -> không khoá (chỉ dùng trong test); còn lại là
-    một LockFs (vd `MemoryLockFs`). Hết giờ chờ -> TimeoutError (job thoát mã khác 0, chưa ghi gì).
+    một LockFs (vd `MemoryLockFs`). `lock_kwargs` chuyển thẳng cho `write_lock` (mặc định của
+    module khoá). Hết giờ chờ -> TimeoutError; writer.lock bị chiếm khi đang chờ reader ->
+    RuntimeError. Cả hai: job thoát mã khác 0, chưa ghi gì.
+    Sau khối `with`, gọi `report_lock_lost` để báo nếu khoá bị mất giữa chừng.
     """
     if lock_fs is False:
         yield _NoLock()
         return
-    from stocklake.common.locks import LockTimeout, hadoop_fs, write_lock
+    from stocklake.common.locks import (
+        DEFAULT_WAIT_TIMEOUT_S,
+        LockLost,
+        LockTimeout,
+        hadoop_fs,
+        write_lock,
+    )
 
     fs = hadoop_fs(spark) if lock_fs is None else lock_fs
     name = f"{LOCK_PREFIX}{table}"
+    wait_s = float(lock_kwargs.get("wait_timeout_s", DEFAULT_WAIT_TIMEOUT_S))
     acquired = False
     try:
-        with write_lock(
-            fs,
-            name,
-            owner=job_owner(spark),
-            ttl_s=ttl_s,
-            wait_timeout_s=wait_timeout_s,
-            **lock_kwargs,
-        ) as handle:
+        with write_lock(fs, name, owner=job_owner(spark), **lock_kwargs) as handle:
             acquired = True
             yield handle
     except LockTimeout as exc:
         if acquired:
             raise
-        msg = f"Không giành được khoá ghi {name} sau {wait_timeout_s:.0f}s; chưa ghi gì. {exc}"
+        msg = f"Không giành được khoá ghi {name} sau {wait_s:.0f}s; chưa ghi gì. {exc}"
         log.error(msg)
         raise TimeoutError(msg) from exc
+    except LockLost as exc:
+        if acquired:
+            raise
+        msg = f"Mất khoá ghi {name} khi đang chờ reader (bị chiếm); chưa ghi gì. {exc}"
+        log.error(msg)
+        raise RuntimeError(msg) from exc
 
 
-def refresh_quietly(handle: Any) -> None:
-    """Gia hạn khoá sau lệnh ghi dài; mất khoá thì chỉ cảnh báo (dữ liệu đã ghi xong)."""
-    try:
-        handle.refresh()
-    except Exception as exc:  # noqa: BLE001 - LockLost hoặc lỗi IO
-        log.warning("Không gia hạn được khoá %s: %s", getattr(handle, "path", "?"), exc)
+def report_lock_lost(handle: Any, result: dict[str, Any]) -> bool:
+    """Ghi `result["lock_lost"]`; khoá mất trong lúc ghi -> log ERROR (dữ liệu đã ghi, job không
+    lỗi, nhưng có thể đã có người đọc/ghi chồng: cần kiểm tra)."""
+    lost = bool(getattr(handle, "lost", False))
+    result["lock_lost"] = lost
+    if lost:
+        log.error(
+            "MẤT khoá ghi %s trong lúc ghi (gia hạn %s lần, lỗi cuối: %s). Dữ liệu đã ghi xong; "
+            "kiểm tra job đọc/ghi chạy cùng lúc.",
+            getattr(handle, "path", "?"),
+            getattr(handle, "refreshes", "?"),
+            getattr(handle, "last_refresh_error", None),
+        )
+    return lost

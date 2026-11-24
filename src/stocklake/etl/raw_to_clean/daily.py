@@ -22,6 +22,7 @@ from stocklake.etl.raw_to_clean._common import (
     conform,
     is_empty_input_error,
     path_exists,
+    report_lock_lost,
     select_contract,
     write_partitioned,
 )
@@ -136,9 +137,17 @@ def run_daily_raw_to_clean(
 
     Thống kê tính trước, khoá ghi `clean.daily_ohlcv` chỉ giữ quanh lệnh ghi. `lock_fs`: None ->
     khoá trên HDFS, False -> không khoá (test), hoặc một LockFs. Hết giờ chờ khoá -> TimeoutError.
+    Khoá mất trong lúc ghi (heartbeat không gia hạn được) -> `lock_lost: true` + log ERROR.
     """
     raw = read_raw_daily(spark, years, base=base)
-    result = {"raw_rows": 0, "clean_rows": 0, "rejected": 0, "partitions": 0, "lock_waited_s": 0.0}
+    result = {
+        "raw_rows": 0,
+        "clean_rows": 0,
+        "rejected": 0,
+        "partitions": 0,
+        "lock_waited_s": 0.0,
+        "lock_lost": False,
+    }
     if raw is None:
         log.warning("Chưa có raw daily_ohlcv")
         return result
@@ -157,6 +166,7 @@ def run_daily_raw_to_clean(
                 with clean_write_lock(spark, CLEAN.name, lock_fs) as handle:
                     result["lock_waited_s"] = round(float(handle.waited_s), 3)
                     write_partitioned(spark, clean, table_path("clean", CLEAN.name, base), part)
+                report_lock_lost(handle, result)
         finally:
             clean.unpersist()
     finally:

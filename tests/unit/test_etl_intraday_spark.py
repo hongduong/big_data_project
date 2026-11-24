@@ -337,7 +337,97 @@ def test_fingerprint_sensitive_to_any_value_change(spark):
     )
 
 
+def _fp_inputs(spark):
+    """Đủ loại dòng: nhiều tháng, bản sao Kafka giao lại, dòng thiếu trường, replay không run id,
+    replay có run id, nguồn viết hoa, history nhiều nguồn và dòng history thiếu trường."""
+    b1, b2, b3 = utc(2026, 1, 5, 3, 0), utc(2026, 2, 5, 3, 0), utc(2025, 12, 31, 16, 0)
+    bad = raw_row("BAD", b1)
+    bad["close"] = None
+    stream = [
+        raw_row("FPT", b1, kafka=1, offset=1),
+        raw_row("FPT", b1, kafka=9, ingest=9, offset=2),  # giao lại y hệt
+        raw_row("FPT", b1, source="KBS", c=106.0),
+        raw_row("VNM", b2, source="replay", run_id="r-1"),
+        raw_row("VNM", b2, source="replay", run_id=None, c=1.0),  # bản tin thử
+        raw_row("HPG", b3),
+        bad,
+    ]
+    hbad = hist_row("BAD", b2)
+    hbad["volume"] = None
+    hist = [
+        hist_row("FPT", b1),
+        hist_row("FPT", b1, ingest=5),  # nạp lại y hệt
+        hist_row("VNM", b2, source="vndirect", c=99.0),
+        hist_row("HPG", b3),
+        hbad,
+    ]
+    return make(spark, stream), make_hist(spark, hist)
+
+
+@pytest.mark.parametrize("which", ["both", "stream", "history"])
+def test_scan_fingerprints_equal_month_fingerprints(spark, which):
+    from stocklake.etl.raw_to_clean.intraday import _scan, month_fingerprints, scan_fingerprints
+
+    s, h = _fp_inputs(spark)
+    s = None if which == "history" else s
+    h = None if which == "stream" else h
+    expected = month_fingerprints(s, h)
+    result = {}
+    scan = _scan(s, h, result)
+    try:
+        got = scan_fingerprints(scan)
+    finally:
+        scan.unpersist()
+    assert expected and got == expected
+    if which == "both":
+        assert set(got) == {"2025-12", "2026-01", "2026-02"}
+        assert (result["raw_rows"], result["history_rows"], result["stream_rows"]) == (12, 5, 7)
+        assert (result["rejected"], result["dropped_untagged_replay"]) == (2, 1)
+
+
+def test_scan_build_matches_clean_intraday(spark):
+    from stocklake.etl.raw_to_clean._common import select_contract
+    from stocklake.etl.raw_to_clean.intraday import CLEAN as CLEAN_T
+    from stocklake.etl.raw_to_clean.intraday import _build, _scan, clean_intraday
+
+    s, h = _fp_inputs(spark)
+    result = {}
+    scan = _scan(s, h, result)
+    best, by_month = _build(scan, result)
+    try:
+        got = sorted(map(tuple, select_contract(best, CLEAN_T).collect()))
+    finally:
+        best.unpersist()
+        scan.unpersist()
+    assert got == sorted(map(tuple, clean_intraday(s, h).collect()))
+    assert result["clean_rows"] == len(got) == sum(by_month.values())
+    assert by_month == {"2025-12": 1, "2026-01": 1, "2026-02": 1}
+    assert result["clean_from_history"] == 3 and result["clean_by_source"] == {
+        "vci": 2,
+        "vndirect": 1,
+    }
+
+
 # ---------------------------------------------------------------- chạy tăng dần end-to-end
+
+
+def _new_locks():
+    """Module khoá có heartbeat; chưa có (đang chuyển giao) thì skip với lý do rõ."""
+    import inspect
+
+    locks = pytest.importorskip("stocklake.common.locks")
+    if "heartbeat" not in inspect.signature(locks.write_lock).parameters:
+        pytest.skip("stocklake.common.locks chưa có giao diện heartbeat (đang chuyển giao)")
+    return locks
+
+
+def _no_heartbeat_left():
+    import threading
+
+    alive = [t for t in threading.enumerate() if t.name.startswith("lock-heartbeat-")]
+    for t in alive:
+        t.join(2.0)
+    return not [t for t in alive if t.is_alive()]
 
 
 class CountingLockFs:
@@ -390,7 +480,7 @@ def _run(spark, base_dir, lock_fs, **kw):
 
 
 def test_incremental_end_to_end(spark, tmp_path):
-    pytest.importorskip("stocklake.common.locks")
+    _new_locks()
     import shutil
     import time
 
@@ -403,7 +493,8 @@ def test_incremental_end_to_end(spark, tmp_path):
     r = _run(spark, tmp_path, locks)
     assert r["mode"] == "full" and r["months_rebuilt"] == ["2026-01", "2026-02"]
     assert r["clean_rows"] == 3 and r["clean_rows_total"] == 3 and r["state_written"]
-    assert locks.writer_acquired == 1 and r["lock_waited_s"] >= 0
+    assert locks.writer_acquired == 1 and r["lock_waited_s"] >= 0 and r["lock_lost"] is False
+    assert locks.inner.files == {} and _no_heartbeat_left()
     st = _state(tmp_path)
     assert st["version"] == 1 and set(st["months"]) == {"2026-01", "2026-02"}
     assert st["months"]["2026-01"]["clean_rows"] == 2
@@ -463,10 +554,80 @@ def test_incremental_end_to_end(spark, tmp_path):
     assert r["mode"] == "full" and _state(tmp_path)["version"] == 1
 
 
+def test_full_then_incremental_finds_no_change(spark, tmp_path):
+    """Trạng thái do lượt full (một lần quét) ghi phải khớp fingerprint của đường tăng dần."""
+    from stocklake.etl.raw_to_clean.intraday import (
+        month_fingerprints,
+        read_raw_history,
+        read_raw_intraday,
+    )
+
+    _new_locks()
+    _write_hist(spark, tmp_path, [hist_row("FPT", utc(2026, 1, 5, 3, 0)), hist_row("VNM")])
+    _write_hist(spark, tmp_path, [hist_row("HPG", utc(2025, 12, 31, 17, 0))], source="kbs")
+    _write_stream(spark, tmp_path, [raw_row("FPT", utc(2026, 1, 5, 3, 0), kafka=3)], "2026-01-05")
+    _write_stream(
+        spark, tmp_path, [raw_row("VNM", utc(2026, 2, 5, 3, 0), source="replay")], "2026-02-05"
+    )
+    fs = CountingLockFs()
+    # lag lớn: horizon lùi về trước mọi thư mục -> lượt sau mọi tháng đều là ứng viên.
+    r = _run(spark, tmp_path, fs, full=True, safety_lag_s=3600.0)
+    assert r["mode"] == "full" and r["months_rebuilt"] == ["2026-01", "2026-02"]
+    assert r["fingerprint_seconds"] >= 0 and r["build_seconds"] >= 0
+    st = _state(tmp_path)
+    base = f"file://{tmp_path}"
+    ref = month_fingerprints(
+        read_raw_intraday(spark, base=base), read_raw_history(spark, base=base)
+    )
+    assert {m: e["fingerprint"] for m, e in st["months"].items()} == ref
+    before = _clean_files(tmp_path)
+
+    r = _run(spark, tmp_path, fs)
+    assert r["mode"] == "incremental" and r["months_candidates"] >= 2
+    assert r["months_rebuilt"] == [] and fs.writer_acquired == 1
+    assert _clean_files(tmp_path) == before
+    assert _no_heartbeat_left()
+
+
+@pytest.mark.parametrize("case", ["no_tables", "only_invalid", "only_history", "only_stream"])
+def test_full_run_on_partial_inputs(spark, tmp_path, case):
+    _new_locks()
+    jan = utc(2026, 1, 5, 3, 0)
+    if case == "only_invalid":
+        bad = raw_row("BAD", jan)
+        bad["close"] = None
+        _write_stream(spark, tmp_path, [bad], "2026-01-05")
+    elif case == "only_history":
+        _write_hist(spark, tmp_path, [hist_row("FPT", jan), hist_row("VNM", jan)])
+    elif case == "only_stream":
+        _write_stream(
+            spark, tmp_path, [raw_row("FPT", jan), raw_row("FPT", jan, kafka=5)], "2026-01-05"
+        )
+    fs = CountingLockFs()
+    r = _run(spark, tmp_path, fs, full=True)
+    assert r["mode"] == "full" and r["state_written"] and r["lock_lost"] is False
+    st = _state(tmp_path)
+    if case in ("no_tables", "only_invalid"):
+        assert r["months_rebuilt"] == [] and r["clean_rows"] == 0 and fs.writer_acquired == 0
+        assert st["months"] == {} and r["rejected"] == (1 if case == "only_invalid" else 0)
+        assert not (tmp_path / "clean" / "intraday_1m" / "year=2026").exists()
+    else:
+        n = 2 if case == "only_history" else 1
+        assert r["months_rebuilt"] == ["2026-01"] and r["clean_rows"] == n
+        assert fs.writer_acquired == 1 and st["months"]["2026-01"]["clean_rows"] == n
+        origin = "history" if case == "only_history" else "stream"
+        assert set(st["months"]["2026-01"]["fingerprint"]) == {origin}
+        out = spark.read.parquet(f"file://{tmp_path}/clean/intraday_1m")
+        assert out.count() == n
+    # Lượt sau (không đổi gì) không dựng lại.
+    r = _run(spark, tmp_path, fs)
+    assert r["months_rebuilt"] == []
+
+
 def test_lock_timeout_writes_nothing(spark, tmp_path):
     from unittest import mock
 
-    locks = pytest.importorskip("stocklake.common.locks")
+    locks = _new_locks()
     from stocklake.etl.raw_to_clean import _common, intraday
 
     real = _common.clean_write_lock
@@ -485,7 +646,7 @@ def test_lock_timeout_writes_nothing(spark, tmp_path):
 
 
 def test_daily_write_takes_lock(spark, tmp_path):
-    locks = pytest.importorskip("stocklake.common.locks")
+    locks = _new_locks()
     from stocklake.etl.raw_to_clean.daily import RAW as DAILY_RAW
     from stocklake.etl.raw_to_clean.daily import run_daily_raw_to_clean
 
@@ -500,6 +661,7 @@ def test_daily_write_takes_lock(spark, tmp_path):
     fs = CountingLockFs()
     r = run_daily_raw_to_clean(spark, None, fs, base=f"file://{tmp_path}")
     assert r["clean_rows"] == 1 and r["lock_waited_s"] >= 0 and fs.writer_acquired == 1
+    assert r["lock_lost"] is False
     assert fs.inner.files == {}
     with locks.read_lock(fs.inner, "clean.daily_ohlcv", owner="dashboard"):
         with pytest.raises(TimeoutError):

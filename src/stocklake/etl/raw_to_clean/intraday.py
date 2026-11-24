@@ -13,6 +13,8 @@ Quyết định:
   raw của CẢ HAI bảng trong tháng đó (tháng theo giờ VN của bar_ts).
 - Chạy tăng dần: chỉ dựng lại tháng có đầu vào thay đổi (trạng thái `_build_state.json` cạnh
   bảng, logic thuần ở `_incremental.py`); lệnh ghi giữ khoá ghi `clean.intraday_1m`.
+- full/--dates (mọi tháng quét đều dựng lại): raw đọc MỘT lần (`_scan`, persist), fingerprint
+  và clean cùng lấy từ lần quét đó.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from stocklake.etl.raw_to_clean._common import (
     is_empty_input_error,
     job_owner,
     path_exists,
-    refresh_quietly,
+    report_lock_lost,
     select_contract,
     vn_date,
     write_partitioned,
@@ -55,6 +57,8 @@ _COMMON = (*_REQUIRED, "source", "ingest_ts", "kafka_ts")
 
 # Mức ưu tiên (xem docstring module).
 PRIO_HISTORY_VCI, PRIO_HISTORY_OTHER, PRIO_STREAM_REAL, PRIO_STREAM_REPLAY = 0, 1, 2, 3
+# Lọc dòng dùng được (đúng bộ lọc của transform và fingerprint).
+_KEEP = "is_valid AND NOT is_untagged_replay"
 # Ước lượng ~128 MB Parquet mỗi file với dòng nến phút (~30 byte/dòng nén); cần đo lại.
 ROWS_PER_FILE = 4_000_000
 
@@ -97,10 +101,11 @@ def _project_stream(stream_df: DataFrame) -> DataFrame:
     prio = F.when(real, F.lit(PRIO_STREAM_REAL)).otherwise(F.lit(PRIO_STREAM_REPLAY))
     return df.select(
         *_COMMON,
+        "replay_run_id",
         "is_valid",
         "is_untagged_replay",
         prio.alias("_prio"),
-        F.lit("stream").alias("_origin"),
+        F.lit(inc.STREAM).alias("_origin"),
     )
 
 
@@ -113,15 +118,16 @@ def _project_history(history_df: DataFrame) -> DataFrame:
     prio = F.when(is_vci, F.lit(PRIO_HISTORY_VCI)).otherwise(F.lit(PRIO_HISTORY_OTHER))
     return df.select(
         *_COMMON,
+        F.lit(None).cast("string").alias("replay_run_id"),
         _valid_expr().alias("is_valid"),
         F.lit(False).alias("is_untagged_replay"),
         prio.alias("_prio"),
-        F.lit("history").alias("_origin"),
+        F.lit(inc.HISTORY).alias("_origin"),
     )
 
 
 def _combine(stream_df: DataFrame | None, history_df: DataFrame | None) -> DataFrame:
-    """Chiếu hai đầu vào về cùng dạng (+ cờ hợp lệ, `_prio`, `_origin`) rồi union."""
+    """Chiếu hai đầu vào về cùng dạng (+ replay_run_id, cờ hợp lệ, `_prio`, `_origin`) rồi union."""
     parts = []
     if stream_df is not None:
         parts.append(_project_stream(stream_df))
@@ -140,7 +146,7 @@ def _dedupe(combined: DataFrame) -> DataFrame:
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
-    df = combined.filter("is_valid AND NOT is_untagged_replay")
+    df = combined.filter(_KEEP)
     w = Window.partitionBy("symbol", "bar_ts").orderBy(
         F.col("_prio").asc(),
         F.col("kafka_ts").desc_nulls_last(),
@@ -264,6 +270,7 @@ def _files_per_partition(clean_rows: int, partitions: int) -> int:
 # Cột đi vào checksum: mọi thứ quyết định nội dung clean, TRỪ ingest_ts/ingest_run_id/cột Kafka
 # (nạp lại y hệt các nến không được coi là thay đổi).
 _FP_COLS = ("symbol", "bar_ts", "open", "high", "low", "close", "volume", "available_at", "source")
+_FP_KEY = (*_FP_COLS, "replay_run_id", "_origin")
 
 
 def month_fingerprints(
@@ -299,8 +306,24 @@ def month_fingerprints(
     df = parts[0]
     for p in parts[1:]:
         df = df.unionByName(p)
+    return _fp_aggregate(df)
+
+
+def scan_fingerprints(scan: DataFrame) -> dict[str, dict[str, dict[str, Any]]]:
+    """Fingerprint từ khung đã quét (`_scan`), không đọc lại raw.
+
+    Cùng định nghĩa với `month_fingerprints` (cùng cột, cùng bộ lọc, cùng khử bản sao, cùng tổng
+    decimal) nên trạng thái do hai đường ghi so sánh được với nhau.
+    """
+    return _fp_aggregate(scan.filter(_KEEP).select(*_FP_KEY))
+
+
+def _fp_aggregate(df: DataFrame) -> dict[str, dict[str, dict[str, Any]]]:
+    """Dòng hợp lệ (cột `_FP_KEY`) -> {'YYYY-MM': {origin: {...}}}; một action (collect)."""
+    from pyspark.sql import functions as F
+
     # Bản sao y hệt (Kafka giao lại, nạp lại cùng nến) không đổi clean -> không tính là thay đổi.
-    df = df.dropDuplicates([*_FP_COLS, "replay_run_id", "_origin"])
+    df = df.dropDuplicates(list(_FP_KEY))
     row_hash = F.xxhash64(*[F.col(c) for c in (*_FP_COLS, "replay_run_id")])
     rows = (
         df.groupBy(F.date_format(vn_date(F.col("bar_ts")), "yyyy-MM").alias("_ym"), "_origin")
@@ -385,48 +408,87 @@ def _empty_result(mode: str) -> dict[str, Any]:
         "clean_rows_total": None,
         "state_written": False,
         "lock_waited_s": 0.0,
+        "lock_lost": False,
         "detect_seconds": 0.0,
+        "fingerprint_seconds": 0.0,
+        "build_seconds": 0.0,
         "write_seconds": 0.0,
         "total_seconds": 0.0,
     }
 
 
-def _build(spark: SparkSession, stream, history, result: dict[str, Any]):
-    """Thống kê đầu vào + khử trùng. Trả (best đã cache | None, số dòng clean theo tháng)."""
+def _scan(stream, history, result: dict[str, Any]) -> DataFrame | None:
+    """Đọc hai đầu vào MỘT lần: chiếu + union, chia theo (symbol, bar_ts), persist.
+
+    Action duy nhất ở đây (thống kê đầu vào) vật chất hoá cache. Sau đó fingerprint
+    (dropDuplicates) và khử trùng (window theo symbol, bar_ts) đọc từ cache; dữ liệu đã chia theo
+    (symbol, bar_ts) nên hai bước đó không cần shuffle toàn bộ lần nữa.
+    MEMORY_AND_DISK: block không vừa bộ nhớ executor nằm ở đĩa cục bộ, không cần cả raw vừa RAM.
+    Trả None (đã unpersist) khi không có dòng nào; còn lại người gọi phải unpersist.
+    """
+    from pyspark import StorageLevel
     from pyspark.sql import functions as F
 
-    combined = _combine(stream, history)
-    s = combined.agg(
-        F.count(F.lit(1)).alias("total"),
-        F.sum(F.when(F.col("_origin") == "history", 1).otherwise(0)).alias("history"),
-        F.sum(F.when(~F.col("is_valid"), 1).otherwise(0)).alias("rejected"),
-        F.sum(F.when(F.col("is_valid") & F.col("is_untagged_replay"), 1).otherwise(0)).alias(
-            "untagged"
-        ),
-    ).collect()[0]
+    scan = _combine(stream, history).repartition("symbol", "bar_ts")
+    scan = scan.persist(StorageLevel.MEMORY_AND_DISK)
+    try:
+        s = scan.agg(
+            F.count(F.lit(1)).alias("total"),
+            F.sum(F.when(F.col("_origin") == inc.HISTORY, 1).otherwise(0)).alias("history"),
+            F.sum(F.when(~F.col("is_valid"), 1).otherwise(0)).alias("rejected"),
+            F.sum(F.when(F.col("is_valid") & F.col("is_untagged_replay"), 1).otherwise(0)).alias(
+                "untagged"
+            ),
+        ).collect()[0]
+    except BaseException:
+        scan.unpersist()
+        raise
     result["raw_rows"] = int(s["total"] or 0)
     result["history_rows"] = int(s["history"] or 0)
     result["stream_rows"] = result["raw_rows"] - result["history_rows"]
     result["rejected"] = int(s["rejected"] or 0)
     result["dropped_untagged_replay"] = int(s["untagged"] or 0)
     if result["raw_rows"] == 0:
-        return None, {}
-    best = _dedupe(combined).cache()
-    by_prio = {r["_prio"]: r["count"] for r in best.groupBy("_prio").count().collect()}
+        scan.unpersist()
+        return None
+    return scan
+
+
+def _build(scan: DataFrame, result: dict[str, Any]):
+    """Khử trùng từ khung đã quét. Trả (best đã persist | None, số dòng clean theo tháng).
+
+    Một action: groupBy(year, month, _prio, source).count() vừa vật chất hoá best vừa cho mọi
+    thống kê clean (theo nguồn, theo mức ưu tiên, theo tháng).
+    """
+    from pyspark import StorageLevel
+
+    keep = (*CLEAN.column_names, "_prio", *CLEAN.derived_partitions)
+    best = _dedupe(scan).select(*keep).persist(StorageLevel.MEMORY_AND_DISK)
+    try:
+        rows = best.groupBy("year", "month", "_prio", "source").count().collect()
+    except BaseException:
+        best.unpersist()
+        raise
+    by_prio: dict[int, int] = {}
+    by_source: dict[str, int] = {}
+    by_month: dict[str, int] = {}
+    for r in rows:
+        n = int(r["count"])
+        by_prio[r["_prio"]] = by_prio.get(r["_prio"], 0) + n
+        by_source[r["source"]] = by_source.get(r["source"], 0) + n
+        key = inc.month_key(r["year"], r["month"])
+        by_month[key] = by_month.get(key, 0) + n
     result["clean_from_history"] = by_prio.get(PRIO_HISTORY_VCI, 0) + by_prio.get(
         PRIO_HISTORY_OTHER, 0
     )
     result["clean_from_stream_real"] = by_prio.get(PRIO_STREAM_REAL, 0)
     result["clean_from_replay"] = by_prio.get(PRIO_STREAM_REPLAY, 0)
     result["clean_rows"] = sum(by_prio.values())
-    result["clean_by_source"] = {
-        r["source"]: r["count"] for r in best.groupBy("source").count().collect()
-    }
-    by_month = {
-        inc.month_key(r["year"], r["month"]): int(r["count"])
-        for r in best.groupBy("year", "month").count().collect()
-    }
+    result["clean_by_source"] = by_source
     result["partitions"] = len(by_month)
+    if not result["clean_rows"]:
+        best.unpersist()
+        return None, {}
     return best, by_month
 
 
@@ -446,10 +508,16 @@ def run_intraday_raw_to_clean(
     - `full=True`, hoặc chưa có/hỏng/khác phiên bản trạng thái: dựng lại mọi tháng, viết lại
       trạng thái.
     - `dates`: ép dựng lại các tháng chứa những ngày này, bất kể fingerprint.
+    full/dates: mọi tháng quét đều dựng lại nên raw chỉ đọc một lần; fingerprint (để ghi trạng
+    thái) và clean cùng lấy từ lần quét đó. incremental: quét tháng ứng viên để so fingerprint,
+    rồi chỉ đọc lại tháng đổi để dựng.
     Mỗi tháng dựng lại từ MỌI dòng raw của cả hai bảng trong tháng (ghi đè phân vùng động thay cả
     tháng). Tháng mồ côi (hết đầu vào) chỉ báo cáo, không xoá.
     `lock_fs`: None -> khoá trên HDFS; False -> không khoá (test); hoặc một LockFs.
-    Trạng thái chỉ ghi SAU khi lệnh ghi Spark thành công.
+    Trạng thái chỉ ghi SAU khi lệnh ghi Spark thành công. Khoá mất trong lúc ghi -> `lock_lost`.
+    Thời gian: detect = tới khi có kế hoạch (full/dates: gồm cả lần quét chung); fingerprint =
+    riêng bước tính fingerprint; build = khử trùng + đếm (incremental: gồm đọc tháng đổi);
+    write = từ sau kế hoạch tới khi ghi xong trạng thái (gồm build).
     """
     t0 = time.monotonic()
     forced = inc.normalise_months(dates) if dates else []
@@ -469,77 +537,98 @@ def run_intraday_raw_to_clean(
     result = _empty_result(mode)
     candidates = inc.candidate_months(dirs, prev) if mode == inc.MODE_INCREMENTAL else {}
     to_fp = inc.months_to_fingerprint(mode, prev, candidates, clean_months, forced)
-    fps = month_fingerprints(*_read_inputs(spark, to_fp, base))
-    plan = inc.decide(mode, prev, to_fp, fps, clean_months, inc.possible_months(dirs), forced)
-    horizon = inc.compute_horizon(probe_ms, dirs, int(safety_lag_s * 1000))
-    result["months_candidates"] = len(plan.compared)
-    result["orphan_months"] = plan.orphans
-    result["detect_seconds"] = round(time.monotonic() - t0, 3)
-    if candidates:
-        log.info("tháng ứng viên: %s", candidates)
-    log.info("kế hoạch: mode=%s dựng lại=%s mồ côi=%s", mode, plan.reasons, plan.orphans)
 
-    def finish(state: dict[str, Any] | None) -> dict[str, Any]:
-        known = state if state is not None else prev
-        result["clean_rows_total"] = inc.clean_rows_total(known)
-        live = set(inc.live_months(known)) | set(plan.rebuild)
-        result["months_total"] = len(live)
-        result["months_rebuilt"] = list(plan.rebuild)
-        result["months_skipped"] = len(live - set(plan.rebuild))
-        result["total_seconds"] = round(time.monotonic() - t0, 3)
-        log.info("intraday raw->clean: %s", result)
-        return result
-
-    def new_state(by_month: dict[str, int]) -> dict[str, Any] | None:
-        return inc.next_state(
-            prev,
-            plan,
-            fps,
-            by_month,
-            horizon_ms=horizon,
-            probe_ms=probe_ms,
-            dirs=dirs,
-            run_id=run_id,
-            now_iso=inc.now_iso(),
-        )
-
-    def save(state: dict[str, Any] | None) -> dict[str, Any] | None:
-        if state is None:
-            log.warning("--dates khi chưa có trạng thái: không ghi trạng thái (lượt sau chạy full)")
-            return None
-        if mode != inc.MODE_FULL:
-            state = inc.merge_state(inc.parse_state(files.read_text(state_path)), state, plan)
-        files.write_text_atomic(state_path, inc.dump_state(state))
-        result["state_written"] = True
-        return state
-
-    if not plan.rebuild:
-        state = None
-        if inc.needs_state_write(plan, prev, candidates, dirs):
-            # Chỉ dời horizon / đánh dấu mồ côi: file nhỏ, không đụng dữ liệu -> không lấy khoá.
-            state = save(new_state({}))
-        return finish(state)
-
-    # --- dựng lại
-    t1 = time.monotonic()
-    months = None if mode == inc.MODE_FULL else plan.rebuild
-    stream, history = _read_inputs(spark, months, base)
-    if stream is None and history is None:  # raw biến mất giữa chừng
-        log.warning("Không còn raw cho các tháng %s", plan.rebuild)
-        return finish(None)
-    best, by_month = _build(spark, stream, history, result)
-    state = None
+    scan = best = None
     try:
-        if best is not None and result["clean_rows"]:
+        if mode == inc.MODE_INCREMENTAL:
+            t_fp = time.monotonic()
+            fps = month_fingerprints(*_read_inputs(spark, to_fp, base))
+        else:
+            # Mọi tháng quét đều dựng lại: một lần quét cho cả fingerprint lẫn clean.
+            stream, history = _read_inputs(spark, to_fp, base)
+            if stream is not None or history is not None:
+                scan = _scan(stream, history, result)
+            t_fp = time.monotonic()
+            fps = scan_fingerprints(scan) if scan is not None else {}
+        result["fingerprint_seconds"] = round(time.monotonic() - t_fp, 3)
+        plan = inc.decide(mode, prev, to_fp, fps, clean_months, inc.possible_months(dirs), forced)
+        horizon = inc.compute_horizon(probe_ms, dirs, int(safety_lag_s * 1000))
+        result["months_candidates"] = len(plan.compared)
+        result["orphan_months"] = plan.orphans
+        result["detect_seconds"] = round(time.monotonic() - t0, 3)
+        if candidates:
+            log.info("tháng ứng viên: %s", candidates)
+        log.info("kế hoạch: mode=%s dựng lại=%s mồ côi=%s", mode, plan.reasons, plan.orphans)
+
+        def finish(state: dict[str, Any] | None) -> dict[str, Any]:
+            known = state if state is not None else prev
+            result["clean_rows_total"] = inc.clean_rows_total(known)
+            live = set(inc.live_months(known)) | set(plan.rebuild)
+            result["months_total"] = len(live)
+            result["months_rebuilt"] = list(plan.rebuild)
+            result["months_skipped"] = len(live - set(plan.rebuild))
+            result["total_seconds"] = round(time.monotonic() - t0, 3)
+            log.info("intraday raw->clean: %s", result)
+            return result
+
+        def new_state(by_month: dict[str, int]) -> dict[str, Any] | None:
+            return inc.next_state(
+                prev,
+                plan,
+                fps,
+                by_month,
+                horizon_ms=horizon,
+                probe_ms=probe_ms,
+                dirs=dirs,
+                run_id=run_id,
+                now_iso=inc.now_iso(),
+            )
+
+        def save(state: dict[str, Any] | None) -> dict[str, Any] | None:
+            if state is None:
+                log.warning(
+                    "--dates khi chưa có trạng thái: không ghi trạng thái (lượt sau chạy full)"
+                )
+                return None
+            if mode != inc.MODE_FULL:
+                state = inc.merge_state(inc.parse_state(files.read_text(state_path)), state, plan)
+            files.write_text_atomic(state_path, inc.dump_state(state))
+            result["state_written"] = True
+            return state
+
+        if not plan.rebuild:
+            state = None
+            if inc.needs_state_write(plan, prev, candidates, dirs):
+                # Chỉ dời horizon / đánh dấu mồ côi: file nhỏ, không đụng dữ liệu -> không lấy khoá.
+                state = save(new_state({}))
+            return finish(state)
+
+        # --- dựng lại
+        t1 = time.monotonic()
+        by_month: dict[str, int] = {}
+        if scan is None:  # incremental: chỉ đọc các tháng đổi
+            stream, history = _read_inputs(spark, plan.rebuild, base)
+            if stream is None and history is None:  # raw biến mất giữa chừng
+                log.warning("Không còn raw cho các tháng %s", plan.rebuild)
+                return finish(None)
+            scan = _scan(stream, history, result)
+        if scan is not None:
+            best, by_month = _build(scan, result)
+            scan.unpersist()  # best đã vật chất hoá: nhả bộ nhớ trước lệnh ghi
+            scan = None
+        result["build_seconds"] = round(time.monotonic() - t1, 3)
+        state = None
+        if best is not None:
             clean = select_contract(best, CLEAN)
             n_files = _files_per_partition(result["clean_rows"], result["partitions"])
             with clean_write_lock(spark, CLEAN.name, lock_fs) as handle:
                 result["lock_waited_s"] = round(float(handle.waited_s), 3)
                 write_partitioned(spark, clean, clean_root, CLEAN.partition_by, n_files)
-                refresh_quietly(handle)  # lệnh ghi có thể dài: gia hạn trước khi ghi trạng thái
                 state = save(new_state(by_month))
+            report_lock_lost(handle, result)
+        result["write_seconds"] = round(time.monotonic() - t1, 3)
+        return finish(state)
     finally:
-        if best is not None:
-            best.unpersist()
-    result["write_seconds"] = round(time.monotonic() - t1, 3)
-    return finish(state)
+        for df in (best, scan):
+            if df is not None:
+                df.unpersist()
