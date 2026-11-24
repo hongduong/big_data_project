@@ -3,6 +3,7 @@
 Endpoint (Planning mục 0.2):
 - POST /api/chart/OHLCChart/gap-chart  — mỗi request một mã, giá điều chỉnh, đơn vị đồng.
 - GET  /api/price/symbols/getAll       — danh sách mã và sàn.
+- GET  /api/price/symbols/getByGroup   — mã thuộc một rổ (vd group=VN30).
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ SOURCE_NAME = "vci"
 BASE_URL = "https://trading.vietcap.com.vn"
 CHART_URL = f"{BASE_URL}/api/chart/OHLCChart/gap-chart"
 SYMBOLS_URL = f"{BASE_URL}/api/price/symbols/getAll"
+GROUP_URL = f"{BASE_URL}/api/price/symbols/getByGroup"
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -171,6 +173,20 @@ def parse_symbols(payload: Any, source: str = SOURCE_NAME) -> list[SymbolInfo]:
     return out
 
 
+def parse_group(payload: Any) -> list[str]:
+    """Phân tích response getByGroup -> danh sách mã (viết hoa, không trùng, giữ thứ tự)."""
+    if not isinstance(payload, list):
+        raise SourceParseError(
+            f"VCI getByGroup: payload phải là list, nhận {type(payload).__name__}"
+        )
+    out: list[str] = []
+    for obj in payload:
+        sym = obj.get("symbol") if isinstance(obj, dict) else None
+        if isinstance(sym, str) and sym.strip() and sym.strip().upper() not in out:
+            out.append(sym.strip().upper())
+    return out
+
+
 # ----------------------------------------------------------------- client
 
 
@@ -273,3 +289,8 @@ class VciClient(SourceClient):
             want = BOARD_TO_EXCHANGE.get(board.upper(), board.upper())
             infos = [i for i in infos if i.exchange == want]
         return infos
+
+    def list_group(self, group: str) -> list[str]:
+        """Mã thuộc rổ `group` (VN30, HNX30, ...) hiện tại, theo thứ tự nguồn trả."""
+        payload = self.http.get_json(GROUP_URL, params={"group": group}, headers=dict(HEADERS))
+        return parse_group(payload)

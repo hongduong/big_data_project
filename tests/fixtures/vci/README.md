@@ -15,3 +15,5 @@ và GET `https://trading.vietcap.com.vn/api/price/symbols/getAll`.
 
 Ngoài ra 1 request thử `countBack` = 6000 cho FPT ONE_DAY (không lưu).
 Mỗi object trong response còn các khóa `accumulatedVolume`, `accumulatedValue`, `minBatchTruncTime` (parser bỏ qua).
+
+`group_vn30.json`: GET `https://trading.vietcap.com.vn/api/price/symbols/getByGroup?group=VN30`, chụp 24/11/2026 (30 mã, cả 30 là cổ phiếu HSX theo getAll), nguyên văn.

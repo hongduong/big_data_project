@@ -12,8 +12,10 @@ from stocklake.sources.base import (
 )
 from stocklake.sources.vci import (
     CHART_URL,
+    GROUP_URL,
     SYMBOLS_URL,
     VciClient,
+    parse_group,
     parse_ohlc_response,
     parse_symbols,
 )
@@ -282,3 +284,25 @@ def test_stubs_raise():
 
     with pytest.raises(NotImplementedError):
         KbsClient()
+
+
+# ------------------------------------------------------------- getByGroup
+
+
+def test_parse_group_vn30_fixture():
+    syms = parse_group(load("group_vn30.json"))
+    assert len(syms) == 30 and len(set(syms)) == 30
+    assert syms == sorted(syms) and {"FPT", "VCB", "HPG"} <= set(syms)
+
+
+def test_parse_group_skips_bad_and_rejects_non_list():
+    assert parse_group([{"symbol": "fpt"}, {"x": 1}, "s", {"symbol": "FPT"}]) == ["FPT"]
+    with pytest.raises(SourceParseError):
+        parse_group({"a": 1})
+
+
+def test_list_group_request():
+    c, s = client(load("group_vn30.json"))
+    assert len(c.list_group("VN30")) == 30
+    method, url, kw = s.calls[0]
+    assert method == "GET" and url == GROUP_URL and kw["params"] == {"group": "VN30"}
