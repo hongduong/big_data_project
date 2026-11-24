@@ -170,7 +170,7 @@ test:
 	  -v "$(CURDIR)":/work:ro -w /work \
 	  -e HOME=/tmp -e PYTHONPATH=/work/src \
 	  -e SPARK_CONF_DIR=/tmp/no-spark-conf -e SPARK_MASTER='local[2]' \
-	  $(SPARK_IMAGE) -c 'pip install --quiet --no-warn-script-location --target /tmp/pytest-deps pytest \
+	  $(SPARK_IMAGE) -c 'pip install --quiet --no-warn-script-location --target /tmp/pytest-deps pytest==9.2.0 \
 	    && PYTHONPATH=/tmp/pytest-deps:$$PYTHONPATH python3 -m pytest -p no:cacheprovider tests/unit $(PYTEST_ARGS)'
 
 lint:
