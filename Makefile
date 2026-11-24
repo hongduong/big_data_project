@@ -12,12 +12,18 @@ PYTHON      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 SPARK_IMAGE ?= stocklake/spark:dev
 W           ?= 3
 PYTEST_ARGS ?=
-# Lát 1 sample pipeline (e2e-sample and its steps).
+# Sample pipeline (e2e-sample and its steps).
 INGEST_ARGS  ?=
 REPLAY_DAYS  ?= 5
 REPLAY_RATE  ?= 2000
+REPLAY_GROUP ?= sample
 REPLAY_ARGS  ?=
 STREAM_ARGS  ?=
+# Lát 2: minute history (HIST_GROUP sample|vn30, or SYMBOLS=FPT,VNM) and intraday DQ.
+HIST_GROUP   ?= sample
+SYMBOLS      ?=
+HIST_ARGS    ?=
+DQ_ARGS      ?=
 SPARK_SUBMIT := docker exec spark-driver spark-submit
 JOBS_DIR     := /opt/stocklake/jobs
 
@@ -34,7 +40,8 @@ EXPECT_WORKERS :=
 endif
 
 .PHONY: help build up down health topics smoke-kafka smoke-spark test lint docs stats clean-all \
-        ingest-daily replay stream-intraday-once verify-replay etl-clean e2e-sample
+        ingest-daily ingest-intraday-history replay stream-intraday-once verify-replay etl-clean \
+        dq-intraday e2e-sample
 
 help:
 	@echo "Targets:"
@@ -50,11 +57,14 @@ help:
 	@echo "  docs               regenerate docs/data_dictionary.md"
 	@echo "  stats              docker stats --no-stream for project containers"
 	@echo "  ingest-daily       daily bars (sample symbols, ~1 year) -> /data/raw/daily_ohlcv [INGEST_ARGS=]"
-	@echo "  replay             replay REPLAY_DAYS days of 1-minute bars to Kafka at REPLAY_RATE msg/s"
+	@echo "  ingest-intraday-history [HIST_GROUP=sample|vn30] [SYMBOLS=A,B] [HIST_ARGS=]"
+	@echo "                     1-minute history (VCI, 1 req/s, refuses trading hours) -> raw/intraday_history"
+	@echo "  replay [REPLAY_GROUP=sample|vn30]   replay REPLAY_DAYS days from raw/intraday_history to Kafka at REPLAY_RATE msg/s"
 	@echo "  stream-intraday-once   Kafka intraday_prices -> /data/raw/intraday_prices (availableNow)"
 	@echo "  verify-replay RUN_ID=.. EXPECTED=..   distinct raw records of a replay run == sent"
 	@echo "  etl-clean          raw -> clean for daily and intraday bars"
-	@echo "  e2e-sample         whole Lát 1 sample pipeline in order; fails if any step fails"
+	@echo "  dq-intraday [DQ_ARGS=]   intraday_1m checks (day coverage, minute vs daily volume)"
+	@echo "  e2e-sample         whole sample pipeline in order; fails if any step fails"
 	@echo "  clean-all CONFIRM=yes   down + DELETE ALL VOLUMES (HDFS, Kafka, collector state)"
 
 build:
@@ -217,11 +227,18 @@ ingest-daily:
 	@echo "== daily OHLCV -> raw (collector)"
 	@docker exec collector python $(JOBS_DIR)/ingest/daily_ohlcv.py $(INGEST_ARGS)
 
-# Banner on stderr: e2e-sample reads the replay JSON line from stdout.
+# Job exit codes: 0 ok, 1 a symbol failed, 2 blocked by the source (429/403), 3 trading hours.
+ingest-intraday-history:
+	@echo "== 1-minute history -> raw/intraday_history (collector, VCI 1 req/s)"
+	@docker exec collector python $(JOBS_DIR)/ingest/intraday_history.py \
+	  $(if $(SYMBOLS),--symbols $(SYMBOLS),--group $(HIST_GROUP)) $(HIST_ARGS)
+
+# Reads raw/intraday_history over WebHDFS (no source calls). Banner on stderr: e2e-sample reads
+# the replay JSON line from stdout.
 replay:
-	@echo "== replay $(REPLAY_DAYS) days at $(REPLAY_RATE) msg/s -> Kafka intraday_prices (collector)" >&2
+	@echo "== replay $(REPLAY_DAYS) days of $(REPLAY_GROUP) at $(REPLAY_RATE) msg/s -> Kafka intraday_prices (collector)" >&2
 	@docker exec collector python $(JOBS_DIR)/streaming/replay.py \
-	  --days $(REPLAY_DAYS) --rate $(REPLAY_RATE) $(REPLAY_ARGS)
+	  --group $(REPLAY_GROUP) --days $(REPLAY_DAYS) --rate $(REPLAY_RATE) $(REPLAY_ARGS)
 
 stream-intraday-once:
 	@echo "== Kafka intraday_prices -> raw (availableNow, checkpoint on HDFS)"
@@ -239,11 +256,22 @@ etl-clean:
 	@echo "== intraday raw -> clean"
 	@$(call spark_job,$(JOBS_DIR)/etl/intraday_raw_to_clean.py)
 
-# Order: daily ingest, replay (run_id + sent from its JSON line), stream once, verify, clean,
-# then the Parquet listing. Any failing step stops the recipe with a non-zero exit.
+# The job exits 0 whenever it ran; each check's pass/fail is inside its JSON line.
+dq-intraday:
+	@echo "== DQ intraday_1m: day coverage vs VNINDEX calendar, minute vs daily volume"
+	@$(call spark_job,$(JOBS_DIR)/dq/intraday_dq.py $(DQ_ARGS))
+
+# Order: daily ingest, minute history, replay (run_id + sent from its JSON line), stream once,
+# verify, clean, DQ, then the Parquet listing. Any failing step stops the recipe non-zero.
+# The history step passes --allow-trading-hours only because the sample is small (10 symbols,
+# a few requests each for the current year); the VN30 wave must never use it.
+# DQ runs with --no-write: its thresholds are still placeholders, so e2e prints the results
+# without failing on them and without appending to curated/dq_report.
 e2e-sample:
 	@$(MAKE) --no-print-directory ingest-daily
-	@line="$$($(MAKE) --no-print-directory replay | tail -1)"; \
+	@$(MAKE) --no-print-directory ingest-intraday-history HIST_GROUP=sample SYMBOLS= \
+	  HIST_ARGS=--allow-trading-hours
+	@line="$$($(MAKE) --no-print-directory replay REPLAY_GROUP=sample | tail -1)"; \
 	echo "$$line"; \
 	run_id="$$(sed -n 's/.*"run_id":"\([^"]*\)".*/\1/p' <<<"$$line")"; \
 	sent="$$(sed -n 's/.*"sent":\([0-9]*\).*/\1/p' <<<"$$line")"; \
@@ -251,11 +279,13 @@ e2e-sample:
 	$(MAKE) --no-print-directory stream-intraday-once; \
 	$(MAKE) --no-print-directory verify-replay RUN_ID="$$run_id" EXPECTED="$$sent"
 	@$(MAKE) --no-print-directory etl-clean
-	@echo "== Parquet files in /data/raw and /data/clean"
-	@docker exec namenode hdfs dfs -ls -R /data/raw /data/clean | grep -E '\.parquet$$'
+	@$(MAKE) --no-print-directory dq-intraday DQ_ARGS=--no-write
+	@echo "== Parquet files per table in /data/raw and /data/clean"
+	@docker exec namenode hdfs dfs -ls -R /data/raw /data/clean | grep -E '\.parquet$$' \
+	  | awk '{n = split($$8, p, "/"); print "/" p[2] "/" p[3] "/" p[4]}' | sort | uniq -c
 	@echo "== per table: DIR_COUNT FILE_COUNT CONTENT_SIZE PATH"
-	@docker exec namenode hdfs dfs -count /data/raw/daily_ohlcv /data/raw/intraday_prices \
-	  /data/clean/daily_ohlcv /data/clean/intraday_1m
+	@docker exec namenode hdfs dfs -count /data/raw/daily_ohlcv /data/raw/intraday_history \
+	  /data/raw/intraday_prices /data/clean/daily_ohlcv /data/clean/intraday_1m
 	@echo "E2E-SAMPLE: OK"
 
 clean-all:
