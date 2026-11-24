@@ -43,7 +43,10 @@ def _normalise(raw_df: DataFrame) -> DataFrame:
     valid = F.lit(True)
     for c in _REQUIRED:
         valid = valid & F.col(c).isNotNull()
-    return df.withColumn("is_valid", valid)
+    # Bản tin thử (vd. send_sample ở Lát 0): source = "replay" nhưng không có replay_run_id.
+    run_id = F.trim(F.coalesce(F.col("replay_run_id"), F.lit("")))
+    untagged = (F.lower(F.col("source")) == F.lit("replay")) & (run_id == F.lit(""))
+    return df.withColumn("is_valid", valid).withColumn("is_untagged_replay", untagged)
 
 
 def count_rejected(raw_df: DataFrame) -> int:
@@ -51,15 +54,21 @@ def count_rejected(raw_df: DataFrame) -> int:
     return _normalise(raw_df).filter("NOT is_valid").count()
 
 
+def count_untagged_replay(raw_df: DataFrame) -> int:
+    """Số dòng hợp lệ bị loại vì source = "replay" mà replay_run_id rỗng."""
+    return _normalise(raw_df).filter("is_valid AND is_untagged_replay").count()
+
+
 def clean_intraday(raw_df: DataFrame) -> DataFrame:
     """Raw -> clean: khử trùng theo (symbol, bar_ts), thêm trade_date (giờ VN), year, month.
 
     Trả đúng các cột contract clean.intraday_1m rồi tới `year`, `month`.
+    Loại bản ghi source = "replay" không có replay_run_id (bản tin thử, không phải dữ liệu).
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
-    df = _normalise(raw_df).filter("is_valid")
+    df = _normalise(raw_df).filter("is_valid AND NOT is_untagged_replay")
     prio = F.when(F.lower(F.col("source")).isin(*REAL_SOURCES), F.lit(0)).otherwise(F.lit(1))
     w = Window.partitionBy("symbol", "bar_ts").orderBy(
         prio.asc(),
@@ -97,7 +106,13 @@ def run_intraday_raw_to_clean(
 ) -> dict[str, Any]:
     """Chạy job: đọc raw, ghi clean phân vùng (year, month). Trả {raw_rows, clean_rows, ...}."""
     raw = read_raw_intraday(spark, dates)
-    result = {"raw_rows": 0, "clean_rows": 0, "rejected": 0, "partitions": 0}
+    result = {
+        "raw_rows": 0,
+        "clean_rows": 0,
+        "rejected": 0,
+        "dropped_untagged_replay": 0,
+        "partitions": 0,
+    }
     if raw is None:
         log.warning("Chưa có raw intraday_prices")
         return result
@@ -110,6 +125,7 @@ def run_intraday_raw_to_clean(
         try:
             result["clean_rows"] = clean.count()
             result["rejected"] = count_rejected(raw)
+            result["dropped_untagged_replay"] = count_untagged_replay(raw)
             if result["clean_rows"]:
                 part = CLEAN.partition_by
                 result["partitions"] = clean.select(*part).distinct().count()

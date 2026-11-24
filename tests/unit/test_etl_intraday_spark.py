@@ -38,7 +38,12 @@ def _nullable(schema):
     return T.StructType([T.StructField(f.name, f.dataType, True) for f in schema.fields])
 
 
-def raw_row(symbol="FPT", bar=None, source="vci", c=105.0, kafka=0, ingest=0, offset=0):
+def raw_row(
+    symbol="FPT", bar=None, source="vci", c=105.0, kafka=0, ingest=0, offset=0, run_id="auto"
+):
+    # Bản ghi replay thật luôn có run id; nguồn thật thì không.
+    if run_id == "auto":
+        run_id = "r-test" if source == "replay" else None
     bar = bar or utc(2026, 1, 5, 3, 0)
     t = utc(2026, 1, 5, 4, 0, 0)
     k = utc(2026, 1, 5, 4, 0, kafka)
@@ -52,7 +57,7 @@ def raw_row(symbol="FPT", bar=None, source="vci", c=105.0, kafka=0, ingest=0, of
         "close": c,
         "volume": 10,
         "produced_ts": t,
-        "replay_run_id": None,
+        "replay_run_id": run_id,
         "trade_date": dt.date(2026, 1, 5),
         "source": source,
         "ingest_ts": i,
@@ -147,3 +152,29 @@ def test_idempotent(spark):
     a = sorted(map(tuple, clean(spark, rows).collect()))
     b = sorted(map(tuple, clean(spark, rows).collect()))
     assert a == b
+
+
+def test_untagged_replay_dropped_and_counted(spark):
+    from stocklake.etl.raw_to_clean.intraday import count_rejected, count_untagged_replay
+
+    b1, b2, b3, b4 = (utc(2026, 1, 5, 3, m) for m in range(4))
+    rows = [
+        raw_row("FPT", b1, source="replay", run_id=None, c=100200.0),  # bản tin thử
+        raw_row("FPT", b2, source="replay", run_id="  ", c=100200.0),  # run id toàn khoảng trắng
+        raw_row("FPT", b3, source="replay", run_id="r-1", c=3.0),  # replay thật: giữ
+        raw_row("FPT", b4, source="vci", run_id=None, c=4.0),  # nguồn thật không có run id: giữ
+    ]
+    raw = make(spark, rows)
+    assert count_untagged_replay(raw) == 2
+    assert count_rejected(raw) == 0
+    assert sorted(r["close"] for r in clean(spark, rows).collect()) == [3.0, 4.0]
+
+
+def test_untagged_replay_does_not_shadow_tagged_bar(spark):
+    bar = utc(2026, 1, 5, 3, 5)
+    rows = [
+        raw_row(bar=bar, source="replay", run_id=None, c=100200.0, kafka=50),
+        raw_row(bar=bar, source="replay", run_id="r-1", c=5.0, kafka=1),
+    ]
+    out = clean(spark, rows).collect()
+    assert len(out) == 1 and out[0]["close"] == 5.0
