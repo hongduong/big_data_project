@@ -1,26 +1,29 @@
+import ast
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from stocklake.contracts.topics import INTRADAY_PRICES
-from stocklake.sources.base import DailyBar, MinuteBar
-from stocklake.sources.vci import MinutePage
+from stocklake.streaming.producers import replay as replay_mod
 from stocklake.streaming.producers.base import serialize
 from stocklake.streaming.producers.replay import (
+    HdfsHistory,
+    HistoryUnavailableError,
     Pacer,
     ReplayBar,
-    ReplayResult,
     bar_to_message,
-    cache_path,
+    day_filters,
+    dedup_sort,
     encode_message,
-    fetch_minute_bars,
-    last_trading_days,
-    load_bars,
+    last_trade_dates,
     merge_bars,
     publish_bars,
     replay,
+    run_replay,
     vn_day_bounds,
+    weekdays,
 )
 
 UTC = timezone.utc
@@ -188,102 +191,210 @@ def test_publish_counts_unflushed_as_failed():
     assert (res.sent, res.delivered, res.failed) == (5, 0, 5)
 
 
-# ------------------------------------------------------------------ nạp nến + cache
+# ------------------------------------------------------------------ chọn ngày, filter, gộp
 
 
-class FakeVci:
-    def __init__(self, bars_by_symbol=None, daily_dates=()):
-        self.bars = bars_by_symbol or {}
-        self.daily_dates = list(daily_dates)
-        self.calls: list[tuple] = []
-
-    def minute_pages(self, symbol, start, end, max_pages=None, resume_to=None, page_size=30000):
-        self.calls.append(("minute", symbol, start, end, page_size))
-        bars = [
-            MinuteBar(symbol, datetime.fromtimestamp(b.bar_ts / 1000, UTC), b.open, b.high,
-                      b.low, b.close, b.volume, "vci")
-            for b in self.bars.get(symbol, [])
-            if start.timestamp() * 1000 <= b.bar_ts < end.timestamp() * 1000
-        ]  # fmt: skip
-        yield MinutePage(bars[::-1], None)
-
-    def daily_bars(self, symbol, start, end):
-        self.calls.append(("daily", symbol, start, end))
-        return [
-            DailyBar(symbol, d, 1, 1, 1, 1, 1, None, "vnd", "vci")
-            for d in self.daily_dates
-            if start <= d <= end
-        ]
+def _day_bars(day: date, symbols=("FPT", "VNM"), n=10) -> list[ReplayBar]:
+    lo, _ = vn_day_bounds(day, day)
+    start = int(lo.timestamp() * 1000) + 9 * 3_600_000
+    out = []
+    for sym in symbols:
+        out += _bars(sym, n, start=start)
+    return dedup_sort((b, "vci") for b in out)
 
 
-def test_vn_day_bounds():
+class FakeHistory:
+    """Lịch sử giả: {ngày: nến}; ghi lại các lần đọc."""
+
+    def __init__(self, days: dict[date, list[ReplayBar]]):
+        self.days = days
+        self.reads: list[date] = []
+
+    def read_day(self, symbols, day):
+        self.reads.append(day)
+        return [b for b in self.days.get(day, []) if b.symbol in symbols]
+
+    def read_year_dates(self, symbols, year):
+        return {d for d, bars in self.days.items() if d.year == year and bars}
+
+
+def test_vn_day_bounds_utc():
     lo, hi = vn_day_bounds(date(2026, 11, 20), date(2026, 11, 20))
     assert lo == datetime(2026, 11, 19, 17, 0, tzinfo=UTC)
-    assert hi - lo == timedelta(days=1)
+    assert hi == datetime(2026, 11, 20, 17, 0, tzinfo=UTC)
+    assert lo.tzinfo is not None  # aware: khớp cột timestamp có tz
 
 
-def test_fetch_filters_sorts_dedups():
-    bars = _bars("FPT", 3) + _bars("FPT", 1)  # trùng nến đầu
-    bars.append(ReplayBar("FPT", T0 + 3 * 86_400_000, 1, 1, 1, 1, 1))  # ngoài khoảng
-    client = FakeVci({"FPT": bars})
-    out = fetch_minute_bars(client, "FPT", date(2026, 11, 20), date(2026, 11, 20))
-    assert [b.bar_ts for b in out] == [T0, T0 + 60_000, T0 + 120_000]
-    assert client.calls[0][4] == 400
+def test_day_filters_output():
+    f = day_filters(["VNM", "FPT", "FPT"], date(2026, 11, 20))
+    assert f == [
+        ("year", "=", 2026),
+        ("symbol", "in", ["FPT", "VNM"]),
+        ("bar_ts", ">=", datetime(2026, 11, 19, 17, 0, tzinfo=UTC)),
+        ("bar_ts", "<", datetime(2026, 11, 20, 17, 0, tzinfo=UTC)),
+    ]
+    assert isinstance(f[0][2], int)
 
 
-def test_load_bars_uses_cache_second_time(tmp_path):
-    client = FakeVci({"FPT": _bars("FPT", 4), "VNM": _bars("VNM", 2)})
-    d = date(2026, 11, 20)
-    first = load_bars(["FPT", "VNM"], d, d, client=client, cache_dir=tmp_path)
-    assert len(client.calls) == 2
-    assert cache_path(tmp_path, "FPT", d, d).name == "FPT_2026-11-20_2026-11-20.jsonl"
-    again = load_bars(["FPT", "VNM"], d, d, client=client, cache_dir=tmp_path)
-    assert len(client.calls) == 2  # không gọi lại nguồn
-    assert again == first
-    assert not list(tmp_path.glob(".*.tmp"))
+def test_day_filters_year_is_vn_year():
+    # 01/01 VN bắt đầu từ 31/12 17:00 UTC nhưng year vẫn là năm VN.
+    f = day_filters(["FPT"], date(2027, 1, 1))
+    assert f[0] == ("year", "=", 2027)
+    assert f[2][2] == datetime(2026, 12, 31, 17, 0, tzinfo=UTC)
 
 
-def test_blocked_source_propagates(tmp_path):
-    from stocklake.common.http import SourceBlockedError
-
-    class Blocked(FakeVci):
-        def minute_pages(self, *a, **k):
-            raise SourceBlockedError("HTTP 429", 429)
-
-    with pytest.raises(SourceBlockedError):
-        load_bars(["FPT"], date(2026, 11, 20), date(2026, 11, 20), client=Blocked(),
-                  cache_dir=tmp_path)  # fmt: skip
-    assert not list(tmp_path.iterdir())
+def test_weekdays_skips_weekend():
+    assert weekdays(date(2026, 11, 20), date(2026, 11, 24)) == [
+        date(2026, 11, 20),
+        date(2026, 11, 23),
+        date(2026, 11, 24),
+    ]
 
 
-def test_last_trading_days_excludes_open_session():
-    days = [date(2026, 11, d) for d in (16, 17, 18, 19, 20, 23, 24)]
-    client = FakeVci(daily_dates=days)
-    # 24/11 10:00 VN: phiên chưa đóng -> bỏ ngày 24.
-    now = datetime(2026, 11, 24, 3, 0, tzinfo=UTC)
-    assert last_trading_days(client, 5, now) == (date(2026, 11, 17), date(2026, 11, 23))
-    # 24/11 16:00 VN: đã đóng.
-    now = datetime(2026, 11, 24, 9, 0, tzinfo=UTC)
-    assert last_trading_days(client, 5, now) == (date(2026, 11, 18), date(2026, 11, 24))
-    with pytest.raises(RuntimeError):
-        last_trading_days(client, 30, now)
+def test_dedup_prefers_vci_and_orders():
+    a = ReplayBar("FPT", T0, 1, 1, 1, 1, 1)
+    b = ReplayBar("FPT", T0, 2, 2, 2, 2, 2)
+    c = ReplayBar("ACB", T0, 3, 3, 3, 3, 3)
+    d = ReplayBar("FPT", T0 - 60_000, 4, 4, 4, 4, 4)
+    out = dedup_sort([(b, "vndirect"), (a, "vci"), (c, "x"), (d, "x")])
+    assert out == [d, c, a]
+    assert dedup_sort([(a, "vci"), (b, "vndirect")]) == [a]
 
 
-def test_replay_end_to_end_with_fakes(tmp_path):
-    client = FakeVci({"FPT": _bars("FPT", 20), "VNM": _bars("VNM", 10, start=T0 + 30_000)})
+def test_last_trade_dates_from_fake_history():
+    h = FakeHistory({date(2026, 11, d): [object()] for d in (16, 17, 18, 19, 20, 23)})
+    h.days[date(2025, 12, 30)] = [object()]
+    got = last_trade_dates(h.read_year_dates, ["FPT"], 3, today=date(2026, 11, 24))
+    assert got == [date(2026, 11, 19), date(2026, 11, 20), date(2026, 11, 23)]
+    # Thiếu trong năm nay -> lùi sang năm trước.
+    got = last_trade_dates(h.read_year_dates, ["FPT"], 7, today=date(2026, 11, 24))
+    assert got[0] == date(2025, 12, 30) and len(got) == 7
+    # Ít hơn N: trả những gì có.
+    assert len(last_trade_dates(h.read_year_dates, ["FPT"], 50, today=date(2026, 11, 24))) == 7
+    with pytest.raises(HistoryUnavailableError):
+        last_trade_dates(lambda s, y: set(), ["FPT"], 3, today=date(2026, 11, 24))
+    with pytest.raises(ValueError):
+        last_trade_dates(h.read_year_dates, ["FPT"], 0)
+
+
+# ------------------------------------------------------------------ replay nhiều ngày
+
+
+def test_replay_days_order_pacing_and_result():
+    d1, d2, d3 = date(2026, 11, 19), date(2026, 11, 20), date(2026, 11, 23)
+    hist = FakeHistory({d1: _day_bars(d1), d3: _day_bars(d3)})  # d2 không có nến
     clock = FakeClock()
-    prod = FakeProducer(clock=clock)
-    d = date(2026, 11, 20)
+    prod = FakeProducer(clock=clock, per_msg_s=5e-6)
     res = replay(
-        ["FPT", "VNM"], d, d, rate=500, client=client, producer=prod, cache_dir=tmp_path,
-        clock=clock, sleep=clock.sleep,
+        ["FPT", "VNM"], [d1, d2, d3], rate=10, run_id="rX", read_day=hist.read_day,
+        producer=prod, clock=clock, sleep=clock.sleep,
     )  # fmt: skip
-    assert isinstance(res, ReplayResult)
-    assert (res.sent, res.delivered, res.failed) == (30, 30, 0)
-    assert res.run_id.startswith("r")
+    assert hist.reads == [d1, d2, d3]  # từng ngày một
+    assert (res.sent, res.delivered, res.failed) == (40, 40, 0)
+    assert (res.days, res.symbols, res.run_id) == (2, 2, "rX")
+    # Nhịp liên tục qua ranh giới ngày: 40 bản tin ở 10 msg/s ~ 4 s, không reset theo ngày.
+    assert res.seconds == pytest.approx(4.0, rel=0.05)
+    msgs = [json.loads(v) for _, _, v in prod.sent]
+    keys = [(m["bar_ts"], m["symbol"]) for m in msgs]
+    assert keys[:20] == sorted(keys[:20]) and keys[20:] == sorted(keys[20:])
+    assert max(k[0] for k in keys[:20]) < min(k[0] for k in keys[20:])
+    assert {m["replay_run_id"] for m in msgs} == {"rX"}
+    assert all(m["source"] == "replay" for m in msgs)
     out = json.loads(res.to_json())
-    assert set(out) == {
-        "run_id", "sent", "delivered", "failed", "seconds", "first_bar_ts", "last_bar_ts",
-    }  # fmt: skip
-    keys = {(json.loads(v)["symbol"], json.loads(v)["bar_ts"]) for _, _, v in prod.sent}
-    assert len(keys) == 30
+    assert {"run_id", "sent", "delivered", "failed", "days", "symbols"} <= set(out)
+
+
+def test_replay_reads_lazily_one_day_at_a_time():
+    d1, d2 = date(2026, 11, 19), date(2026, 11, 20)
+    hist = FakeHistory({d1: _day_bars(d1), d2: _day_bars(d2)})
+    seen_at_send: list[int] = []
+
+    class Spy(FakeProducer):
+        def produce(self, *a, **k):
+            seen_at_send.append(len(hist.reads))
+            super().produce(*a, **k)
+
+    clock = FakeClock()
+    replay(["FPT", "VNM"], [d1, d2], rate=1000, read_day=hist.read_day, producer=Spy(),
+           clock=clock, sleep=clock.sleep)  # fmt: skip
+    assert seen_at_send[0] == 1 and seen_at_send[-1] == 2  # ngày 2 chỉ đọc sau khi hết ngày 1
+
+
+def test_replay_no_bars_raises_before_producer():
+    hist = FakeHistory({})
+    with pytest.raises(HistoryUnavailableError, match="intraday_history.py"):
+        replay(["FPT"], [date(2026, 11, 20)], read_day=hist.read_day, producer=object())
+
+
+def test_hdfs_history_missing_table_message():
+    class NoFs:
+        def exists(self, path):
+            return False
+
+    pytest.importorskip("pyarrow")
+    with pytest.raises(HistoryUnavailableError, match="intraday_history.py"):
+        HdfsHistory(fs=NoFs()).read_day(["FPT"], date(2026, 11, 20))
+
+
+def test_table_helpers_with_pyarrow():
+    pa = pytest.importorskip("pyarrow")
+    from stocklake.streaming.producers.replay import table_to_rows, table_to_trade_dates
+
+    utc = timezone.utc
+    # 2026-11-20 16:59 UTC = 2026-11-20 23:59 VN; 17:00 UTC = 2026-11-21 00:00 VN
+    ts = [datetime(2026, 11, 20, 2, 15, tzinfo=utc), datetime(2026, 11, 20, 16, 59, tzinfo=utc),
+          datetime(2026, 11, 20, 17, 0, tzinfo=utc)]  # fmt: skip
+    t = pa.table({
+        "symbol": ["FPT"] * 3, "bar_ts": pa.array(ts, pa.timestamp("us", tz="UTC")),
+        "open": [1.0] * 3, "high": [1.0] * 3, "low": [1.0] * 3, "close": [1.0] * 3,
+        "volume": pa.array([10, 20, 30], pa.int64()), "source": ["vci"] * 3,
+    })  # fmt: skip
+    assert table_to_trade_dates(t) == {date(2026, 11, 20), date(2026, 11, 21)}
+    rows = table_to_rows(t)
+    assert rows[0][0].bar_ts == int(ts[0].timestamp() * 1000) and rows[0][1] == "vci"
+    assert table_to_trade_dates(t.slice(0, 0)) == set()
+
+
+def test_replay_with_days_selected_from_history():
+    ds = [date(2026, 11, d) for d in (17, 18, 19, 20)]
+    hist = FakeHistory({d: _day_bars(d) for d in ds})
+    clock = FakeClock()
+    chosen = last_trade_dates(hist.read_year_dates, ["FPT"], 2, today=date(2026, 11, 24))
+    res = replay(["FPT", "VNM"], chosen, rate=1000, read_day=hist.read_day,
+                 producer=FakeProducer(clock=clock), clock=clock, sleep=clock.sleep)  # fmt: skip
+    assert chosen == ds[-2:] and res.days == 2 and res.sent == 40
+
+
+def test_run_replay_start_end_rejects_partial_and_reversed():
+    with pytest.raises(ValueError):
+        run_replay(["FPT"], start=date(2026, 11, 20), history=FakeHistory({}))
+    with pytest.raises(ValueError):
+        run_replay(["FPT"], start=date(2026, 11, 21), end=date(2026, 11, 20),
+                   history=FakeHistory({}))  # fmt: skip
+
+
+def test_run_replay_start_end_reads_weekdays_only():
+    hist = FakeHistory({})
+    with pytest.raises(HistoryUnavailableError):
+        run_replay(["FPT"], start=date(2026, 11, 20), end=date(2026, 11, 23), history=hist)
+    assert hist.reads == [date(2026, 11, 20), date(2026, 11, 23)]
+
+
+# ------------------------------------------------------------------ ranh giới module
+
+
+def test_replay_module_has_no_sources_or_cache():
+    src = Path(replay_mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    mods = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            mods += [a.name for a in n.names]
+        elif isinstance(n, ast.ImportFrom):
+            mods.append(n.module or "")
+    assert not [m for m in mods if m.startswith("stocklake.sources")]
+    assert not [m for m in mods if m.split(".")[0] in ("ingestion", "etl", "dq", "analytics")]
+    top = {n.names[0].name.split(".")[0] for n in tree.body if isinstance(n, ast.Import)}
+    top |= {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom) and n.module}
+    assert not top & {"pyarrow", "confluent_kafka", "fsspec"}
+    assert "VciClient" not in src and "replay_cache" not in src
