@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cấu trúc repo</title><style>
+:root{--bg:#fafaf9;--ink:#1c1917;--ink2:#44403c;--muted:#78716c;--box:#ffffff;--inner:#fff7ed;--line:#e7e5e4;
+--b-app:#eef2ff;--s-app:#6366f1;--b-pres:#ecfdf5;--s-pres:#059669;--b-appl:#fff7ed;--s-appl:#ea580c;
+--b-dom:#fdf2f8;--s-dom:#db2777;--b-data:#f1f5f9;--s-data:#475569;--star:#b45309;--note:#fefce8}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#1c1917;--ink:#f5f5f4;--ink2:#d6d3d1;--muted:#a8a29e;--box:#292524;--inner:#3a2a1c;--line:#44403c;
+--b-app:#1e1b4b;--b-pres:#022c22;--b-appl:#2a1606;--b-dom:#2a0b1c;--b-data:#1e293b;--star:#fbbf24;--note:#3a3410}}
+:root[data-theme="dark"]{--bg:#1c1917;--ink:#f5f5f4;--ink2:#d6d3d1;--muted:#a8a29e;--box:#292524;--inner:#3a2a1c;--line:#44403c;
+--b-app:#1e1b4b;--b-pres:#022c22;--b-appl:#2a1606;--b-dom:#2a0b1c;--b-data:#1e293b;--star:#fbbf24;--note:#3a3410}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:1310px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:36px 0 10px;border-top:1px solid var(--line);padding-top:18px}
+.sub{color:var(--muted);font-size:13px;margin:0 0 8px}
+.fig{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.fig svg{display:block}
+svg text{fill:var(--ink)}
+.bn{font-weight:650}.bl{font-size:12px;fill:var(--ink2)}.st{font-size:12px;fill:var(--star);font-weight:600}
+.tag{font-size:12px;font-weight:700}
+.lb{font-size:11px;fill:var(--ink2);paint-order:stroke;stroke:var(--bg);stroke-width:4px;stroke-linejoin:round}
+.band{font-size:12px;font-weight:700;fill:var(--muted);letter-spacing:.02em}
+.num{font-size:11px;font-weight:700;fill:var(--muted)}
+.ar{fill:none;stroke:var(--ink2);stroke-width:1.2}.da{stroke-dasharray:6 4}.own{stroke-width:2.4}.dt{stroke-width:2;stroke-dasharray:0.1 5;stroke-linecap:round}
+.life{stroke:var(--line);stroke-width:1.5;stroke-dasharray:3 4}
+.note{fill:var(--note);stroke:var(--line)}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin-top:10px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+@media (max-width:600px){th,td{padding:5px 4px;font-size:12.5px}}
+.ev td:first-child{white-space:nowrap}
+code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+ul{margin:8px 0;padding-left:20px}li{margin:4px 0}
+.ok{color:#059669;font-weight:700}.no{color:#dc2626;font-weight:700}.mid{color:#d97706;font-weight:700}
+</style></head>
+<body><main>
+<h1>Cấu trúc repo <code>big_data_project</code>: một package, điểm vào mỏng</h1>
+<p class="sub">Bản đã duyệt 24/11/2026, khớp với <code>Planning.md</code> mục 3.1. Chưa có code.</p>
+
+<h2>1. Cấu trúc đích</h2>
+<div class="fig"><svg width="1270" height="890" viewBox="0 0 1270 890" role="img" aria-label="Cấu trúc repo đích">
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink2)"/></marker>
+<marker id="ahs" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M10,0 L0,5 L10,10 z" fill="var(--ink2)"/></marker>
+<marker id="dia" viewBox="0 0 12 8" refX="1" refY="4" markerWidth="13" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,4 L6,0 L12,4 L6,8 z" fill="var(--ink2)"/></marker>
+<marker id="ahv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto"><path d="M1,1 L9,5 L1,9" fill="none" stroke="var(--ink2)" stroke-width="1.6"/></marker>
+</defs>
+<rect x="0" y="10" width="1270" height="130" fill="var(--b-app)"/>
+<text x="10" y="30" class="band">Vận hành</text>
+<rect x="0" y="150" width="1270" height="120" fill="var(--b-pres)"/>
+<text x="10" y="170" class="band">Điểm vào</text>
+<rect x="0" y="280" width="1270" height="140" fill="var(--b-appl)"/>
+<text x="10" y="300" class="band">Logic</text>
+<rect x="0" y="430" width="1270" height="250" fill="var(--b-dom)"/>
+<text x="10" y="450" class="band">Nền chung</text>
+<rect x="0" y="690" width="1270" height="110" fill="var(--b-data)"/>
+<text x="10" y="710" class="band">Kiểm chứng</text>
+<rect x="150" y="52" width="160" height="78" rx="6" fill="var(--box)" stroke="var(--s-app)" stroke-width="1.6"/>
+<text x="158" y="70" class="bn" font-size="13">Makefile</text>
+<text x="158" y="86" class="st">★ Hùng Dương</text>
+<text x="158" y="102" class="bl">up · health · e2e</text>
+<text x="158" y="118" class="bl">bench-* · test · lint</text>
+<rect x="350" y="52" width="200" height="78" rx="6" fill="var(--box)" stroke="var(--s-app)" stroke-width="1.6"/>
+<text x="358" y="70" class="bn" font-size="13">docker-compose.yml</text>
+<text x="358" y="86" class="st">★ Hùng Dương</text>
+<text x="358" y="102" class="bl">mem_limit, cpus từng dịch vụ</text>
+<text x="358" y="118" class="bl">profiles w1 · w2 · w3</text>
+<rect x="590" y="52" width="180" height="78" rx="6" fill="var(--box)" stroke="var(--s-app)" stroke-width="1.6"/>
+<text x="598" y="70" class="bn" font-size="13">docker/</text>
+<text x="598" y="86" class="st">★ Hùng Dương</text>
+<text x="598" y="102" class="bl">3 Dockerfile: spark,</text>
+<text x="598" y="118" class="bl">collector, dashboard</text>
+<rect x="810" y="52" width="180" height="78" rx="6" fill="var(--box)" stroke="var(--s-app)" stroke-width="1.6"/>
+<text x="818" y="70" class="bn" font-size="13">pyproject.toml</text>
+<text x="818" y="86" class="st">★ Hùng Dương</text>
+<text x="818" y="102" class="bl">nhóm thư viện: spark ·</text>
+<text x="818" y="118" class="bl">collector · dashboard · dev</text>
+<rect x="1030" y="52" width="190" height="78" rx="6" fill="var(--box)" stroke="var(--s-app)" stroke-width="1.6"/>
+<text x="1038" y="70" class="bn" font-size="13">conf/</text>
+<text x="1038" y="86" class="st">★ Hùng Dương</text>
+<text x="1038" y="102" class="bl">hadoop/ · kafka/ · spark/</text>
+<text x="1038" y="118" class="bl">app/: mã, nguồn, tốc độ gọi</text>
+<path d="M310,91 L348,91" class="ar" marker-end="url(#ah)"/>
+<text x="330" y="84" class="lb" text-anchor="middle">gọi</text>
+<path d="M550,91 L588,91" class="ar" marker-end="url(#ah)"/>
+<text x="570" y="84" class="lb" text-anchor="middle">build</text>
+<path d="M810,91 L772,91" class="ar dt" marker-end="url(#ahv)"/>
+<text x="791" y="84" class="lb" text-anchor="middle">wheel</text>
+<path d="M1125,52 L1125,38 L450,38 L450,50" class="ar dt" marker-end="url(#ahv)"/>
+<text x="790" y="33" class="lb" text-anchor="middle">mount cấu hình vào container</text>
+<rect x="150" y="178" width="420" height="78" rx="6" fill="var(--box)" stroke="var(--s-pres)" stroke-width="1.6"/>
+<text x="158" y="196" class="bn" font-size="13">jobs/</text>
+<text x="158" y="212" class="bl">ingest/ · streaming/ · etl/ · dq/ · analytics/ (chủ theo module)</text>
+<text x="158" y="228" class="bl">mỗi file: đọc tham số → gọi 1 hàm trong stocklake</text>
+<text x="158" y="244" class="bl">không chứa logic; chạy bằng spark-submit hoặc python</text>
+<rect x="610" y="178" width="290" height="78" rx="6" fill="var(--box)" stroke="var(--s-pres)" stroke-width="1.6"/>
+<text x="618" y="196" class="bn" font-size="13">benchmarks/</text>
+<text x="618" y="212" class="bl">storage/ · scaleout/ · streaming/ ·</text>
+<text x="618" y="228" class="bl">fault_tolerance/ · summary/</text>
+<text x="618" y="244" class="bl">results/: CSV, JSON, PNG có commit</text>
+<rect x="940" y="178" width="280" height="78" rx="6" fill="var(--box)" stroke="var(--s-pres)" stroke-width="1.6"/>
+<text x="948" y="196" class="bn" font-size="13">dashboard/</text>
+<text x="948" y="212" class="st">★ Thanh</text>
+<text x="948" y="228" class="bl">app.py · pages/ (Streamlit)</text>
+<text x="948" y="244" class="bl">đọc curated qua WebHDFS</text>
+<path d="M640,130 L640,154 L500,154 L500,176" class="ar own" marker-start="url(#dia)" marker-end="url(#ah)"/>
+<text x="506" y="170" class="lb" text-anchor="start">COPY jobs/ + wheel</text>
+<path d="M610,217 L572,217" class="ar" marker-end="url(#ah)"/>
+<text x="591" y="210" class="lb" text-anchor="middle">chạy</text>
+<rect x="150" y="320" width="202" height="78" rx="6" fill="var(--box)" stroke="var(--s-appl)" stroke-width="1.6"/>
+<text x="158" y="338" class="bn" font-size="13">src/stocklake/ingestion/</text>
+<text x="158" y="354" class="st">★ Hồng Dương</text>
+<text x="158" y="370" class="bl">framework/: fallback, state</text>
+<text x="158" y="386" class="bl">collectors/: các job batch</text>
+<path d="M251,292 L251,318" class="ar" marker-end="url(#ah)"/>
+<rect x="367" y="320" width="202" height="78" rx="6" fill="var(--box)" stroke="var(--s-appl)" stroke-width="1.6"/>
+<text x="375" y="338" class="bn" font-size="13">src/stocklake/streaming/</text>
+<text x="375" y="354" class="st">★ Tuyền</text>
+<text x="375" y="370" class="bl">producers/: intraday, rss,</text>
+<text x="375" y="386" class="bl">replay · sinks/: Kafka → raw</text>
+<path d="M468,292 L468,318" class="ar" marker-end="url(#ah)"/>
+<rect x="584" y="320" width="202" height="78" rx="6" fill="var(--box)" stroke="var(--s-appl)" stroke-width="1.6"/>
+<text x="592" y="338" class="bn" font-size="13">src/stocklake/etl/</text>
+<text x="592" y="354" class="st">★ Hùng Dương</text>
+<text x="592" y="370" class="bl">raw_to_clean/ · compaction/</text>
+<text x="592" y="386" class="bl">hàm DataFrame → DataFrame</text>
+<path d="M685,292 L685,318" class="ar" marker-end="url(#ah)"/>
+<rect x="801" y="320" width="202" height="78" rx="6" fill="var(--box)" stroke="var(--s-appl)" stroke-width="1.6"/>
+<text x="809" y="338" class="bn" font-size="13">src/stocklake/dq/</text>
+<text x="809" y="354" class="st">★ Hồng Dương</text>
+<text x="809" y="370" class="bl">checks/: 5 nhóm kiểm tra</text>
+<text x="809" y="386" class="bl">report.py → dq_report</text>
+<path d="M902,292 L902,318" class="ar" marker-end="url(#ah)"/>
+<rect x="1018" y="320" width="202" height="78" rx="6" fill="var(--box)" stroke="var(--s-appl)" stroke-width="1.6"/>
+<text x="1026" y="338" class="bn" font-size="13">src/stocklake/analytics/</text>
+<text x="1026" y="354" class="st">★ Thanh</text>
+<text x="1026" y="370" class="bl">curated/ · sql/</text>
+<text x="1026" y="386" class="bl">ml/: baseline, leakage test</text>
+<path d="M1119,292 L1119,318" class="ar" marker-end="url(#ah)"/>
+<path d="M360,256 L360,292 M251,292 L1119,292" class="ar"/>
+<text x="366" y="276" class="lb" text-anchor="start">import: mỗi job gọi 1 hàm</text>
+<rect x="300" y="452" width="370" height="78" rx="6" fill="var(--box)" stroke="var(--s-dom)" stroke-width="1.6"/>
+<text x="308" y="470" class="bn" font-size="13">src/stocklake/sources/</text>
+<text x="308" y="486" class="st">★ Hồng Dương</text>
+<text x="308" y="502" class="bl">client gọi nguồn + phân tích kết quả trả về</text>
+<text x="308" y="518" class="bl">vci · vndirect · kbs · cafef · yahoo · fred · rss</text>
+<rect x="150" y="568" width="500" height="78" rx="6" fill="var(--box)" stroke="var(--s-dom)" stroke-width="1.6"/>
+<text x="158" y="586" class="bn" font-size="13">src/stocklake/common/</text>
+<text x="158" y="602" class="st">★ Hùng Dương</text>
+<text x="158" y="618" class="bl">config.py · spark.py · hdfs.py (WebHDFS) · logging.py</text>
+<text x="158" y="634" class="bl">http.py: retry, backoff, giới hạn tốc độ dùng chung</text>
+<rect x="700" y="568" width="520" height="78" rx="6" fill="var(--box)" stroke="var(--s-dom)" stroke-width="1.6"/>
+<text x="708" y="586" class="bn" font-size="13">src/stocklake/contracts/</text>
+<text x="708" y="602" class="st">★ cả nhóm: sửa phải báo, commit riêng</text>
+<text x="708" y="618" class="bl">schemas.py (trung lập, Python thuần) · convert.py → Spark, pyarrow</text>
+<text x="708" y="634" class="bl">topics.py · paths.py · available_at.py</text>
+<path d="M251,398 L251,424 M468,398 L468,424 M685,398 L685,424 M902,398 L902,424 M1119,398 L1119,424 M225,424 L1119,424" class="ar"/>
+<path d="M225,424 L225,566" class="ar" marker-end="url(#ah)"/>
+<path d="M485,424 L485,450" class="ar" marker-end="url(#ah)"/>
+<path d="M960,424 L960,566" class="ar" marker-end="url(#ah)"/>
+<text x="491" y="444" class="lb" text-anchor="start">import · 5 module không import lẫn nhau</text>
+<path d="M485,530 L485,566" class="ar" marker-end="url(#ah)"/>
+<path d="M640,530 L640,548 L800,548 L800,566" class="ar" marker-end="url(#ah)"/>
+<text x="491" y="553" class="lb" text-anchor="start">import</text>
+<path d="M650,607 L698,607" class="ar" marker-end="url(#ah)"/>
+<text x="674" y="600" class="lb" text-anchor="middle">import</text>
+<path d="M1220,217 L1245,217 L1245,607 L1222,607" class="ar" marker-end="url(#ah)"/>
+<text x="1259" y="410" class="lb" text-anchor="middle" transform="rotate(90 1259 410)">import contracts (không cần pyspark)</text>
+<rect x="150" y="712" width="330" height="78" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="158" y="730" class="bn" font-size="13">tests/</text>
+<text x="158" y="746" class="bl">unit/: không cần cụm; test Spark đánh dấu spark</text>
+<text x="158" y="762" class="bl">integration/: cần cụm, chạy trên PC</text>
+<text x="158" y="778" class="bl">fixtures/: mẫu JSON thật của từng nguồn</text>
+<rect x="520" y="712" width="280" height="78" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="528" y="730" class="bn" font-size="13">.github/workflows/</text>
+<text x="528" y="746" class="bl">ci.yml: ruff + pytest không cần Spark</text>
+<text x="528" y="762" class="bl">khi push lên develop</text>
+<text x="528" y="778" class="bl">(tuỳ chọn, mức tối thiểu)</text>
+<rect x="840" y="712" width="380" height="78" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="848" y="730" class="bn" font-size="13">docs/</text>
+<text x="848" y="746" class="bl">Planning.md · runbook.md, adr/ (mức tối thiểu)</text>
+<text x="848" y="762" class="bl">data_dictionary.md: sinh từ schema trung lập</text>
+<path d="M150,751 L138,751 L138,359 L148,359" class="ar da" marker-end="url(#ah)"/>
+<text x="118" y="560" class="lb" text-anchor="middle" transform="rotate(90 118 560)">kiểm thử: import stocklake</text>
+<path d="M520,751 L482,751" class="ar" marker-end="url(#ah)"/>
+<text x="501" y="744" class="lb" text-anchor="middle">chạy</text>
+<path d="M1000,646 L1000,710" class="ar dt" marker-end="url(#ahv)"/>
+<text x="1006" y="684" class="lb" text-anchor="start">make docs</text>
+<path d="M150,826 L196,826" class="ar" marker-end="url(#ah)"/>
+<text x="204" y="830" class="lb" text-anchor="start">import / gọi (chỉ đi xuống)</text>
+<path d="M400,826 L446,826" class="ar own" marker-start="url(#dia)" marker-end="url(#ah)"/>
+<text x="454" y="830" class="lb" text-anchor="start">đóng gói vào image</text>
+<path d="M600,826 L646,826" class="ar dt" marker-end="url(#ahv)"/>
+<text x="654" y="830" class="lb" text-anchor="start">cấu hình / tài liệu sinh ra</text>
+<path d="M850,826 L896,826" class="ar da" marker-end="url(#ah)"/>
+<text x="904" y="830" class="lb" text-anchor="start">kiểm thử</text>
+<text x="150" y="856" class="st" text-anchor="start">★ thành viên đứng tên commit của thư mục đó</text>
+<text x="450" y="856" class="lb" text-anchor="start">tên có dấu / ở cuối = thư mục</text>
+</svg></div>
+<ul>
+<li><b>Một package cài được.</b> Mọi logic nằm trong <code>src/stocklake/</code>, khai báo bằng một <code>pyproject.toml</code>. Collector, Spark, dashboard và test import cùng một bản.</li>
+<li><b>Mỗi image cài một nhóm thư viện.</b> <code>stocklake[spark]</code>, <code>[collector]</code>, <code>[dashboard]</code>, thêm <code>dev</code> cho test. Nhóm <code>spark</code> không kéo pyspark vì image <code>apache/spark</code> đã có; pyspark nằm ở <code>dev</code>, ghim cùng phiên bản.</li>
+<li><b>Schema trung lập.</b> <code>schemas.py</code> là Python thuần (tên cột, kiểu, nullable, khoá chính, mô tả). <code>convert.py</code> chuyển sang Spark và pyarrow, chỉ import hai thư viện đó bên trong hàm. Collector và dashboard không phải cài pyspark.</li>
+<li><b>Quy tắc phụ thuộc.</b> Năm module logic không import lẫn nhau; chỉ phụ thuộc <code>contracts</code>, <code>common</code> và <code>sources</code>. <code>sources</code> chỉ phụ thuộc <code>contracts</code> và <code>common</code>. Nhờ vậy producer giá phút của <code>streaming</code> gọi được VCI mà không đụng <code>ingestion</code>.</li>
+<li><b>Điểm vào mỏng.</b> File trong <code>jobs/</code> chỉ đọc tham số rồi gọi một hàm, nên logic test được bằng Spark local.</li>
+<li><b>Mount code khi phát triển.</b> Mount <code>src/</code> và <code>jobs/</code> cho cả worker lẫn driver; chỉ mount driver thì executor vẫn chạy bản cũ trong wheel.</li>
+</ul>
+
+<h2>2. Trước và sau</h2>
+<div class="fig"><svg width="1270" height="668" viewBox="0 0 1270 668" role="img" aria-label="Hiện tại và đích">
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink2)"/></marker>
+<marker id="ahs" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M10,0 L0,5 L10,10 z" fill="var(--ink2)"/></marker>
+<marker id="dia" viewBox="0 0 12 8" refX="1" refY="4" markerWidth="13" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,4 L6,0 L12,4 L6,8 z" fill="var(--ink2)"/></marker>
+<marker id="ahv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto"><path d="M1,1 L9,5 L1,9" fill="none" stroke="var(--ink2)" stroke-width="1.6"/></marker>
+</defs>
+<text x="20" y="24" class="band">Trước: cây thư mục cũ</text>
+<text x="780" y="24" class="band">Đích</text>
+<rect x="20" y="44" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="62" class="bn" font-size="13">contracts/ ở gốc repo</text>
+<text x="28" y="78" class="bl">job Spark và 3 image không có cách import chung</text>
+<text x="492" y="62" class="tag" text-anchor="end">G1 🔴</text>
+<rect x="780" y="44" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-dom)" stroke-width="1.6"/>
+<text x="788" y="62" class="bn" font-size="13">src/stocklake/contracts/</text>
+<text x="788" y="78" class="bl">đi theo wheel vào mọi image</text>
+<path d="M500,70.0 L778,70.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="64.0" class="lb" text-anchor="middle">dời vào package</text>
+<rect x="20" y="106" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="124" class="bn" font-size="13">ingestion/sources/ (client VCI, RSS, …)</text>
+<text x="28" y="140" class="bl">streaming cũng phải gọi VCI nhưng không được import ingestion</text>
+<text x="492" y="124" class="tag" text-anchor="end">G9 🟠</text>
+<rect x="780" y="106" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-dom)" stroke-width="1.6"/>
+<text x="788" y="124" class="bn" font-size="13">src/stocklake/sources/</text>
+<text x="788" y="140" class="bl">ingestion và streaming cùng dùng</text>
+<path d="M500,132.0 L778,132.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="126.0" class="lb" text-anchor="middle">tách thành module</text>
+<rect x="20" y="168" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="186" class="bn" font-size="13">schemas.py viết bằng StructType</text>
+<text x="28" y="202" class="bl">import contracts là phải cài pyspark</text>
+<text x="492" y="186" class="tag" text-anchor="end">G10 🟠</text>
+<rect x="780" y="168" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-dom)" stroke-width="1.6"/>
+<text x="788" y="186" class="bn" font-size="13">schemas.py trung lập + convert.py</text>
+<text x="788" y="202" class="bl">pyspark, pyarrow chỉ import trong hàm chuyển</text>
+<path d="M500,194.0 L778,194.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="188.0" class="lb" text-anchor="middle">đổi cách khai báo</text>
+<rect x="20" y="230" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="248" class="bn" font-size="13">ingestion/ dq/ streaming/ etl/ analytics/ ở gốc</text>
+<text x="28" y="264" class="bl">5 thư mục rời, không cài được bằng pip</text>
+<text x="492" y="248" class="tag" text-anchor="end">G2 🔴</text>
+<rect x="780" y="230" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-appl)" stroke-width="1.6"/>
+<text x="788" y="248" class="bn" font-size="13">src/stocklake/&lt;module&gt;/</text>
+<text x="788" y="264" class="bl">pip install -e . là import được ở mọi nơi</text>
+<path d="M500,256.0 L778,256.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="250.0" class="lb" text-anchor="middle">gộp thành 1 package</text>
+<rect x="20" y="292" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="310" class="bn" font-size="13">ingestion/jobs/ · streaming/jobs/</text>
+<text x="28" y="326" class="bl">điểm vào nằm lẫn với logic</text>
+<text x="492" y="310" class="tag" text-anchor="end">G3 🟠</text>
+<rect x="780" y="292" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-pres)" stroke-width="1.6"/>
+<text x="788" y="310" class="bn" font-size="13">jobs/&lt;module&gt;/*.py</text>
+<text x="788" y="326" class="bl">mỏng; logic là hàm test được trong stocklake</text>
+<path d="M500,318.0 L778,318.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="312.0" class="lb" text-anchor="middle">tách điểm vào</text>
+<rect x="20" y="354" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="372" class="bn" font-size="13">Dockerfile ở ingestion/, dashboard/, infra/spark/</text>
+<text x="28" y="388" class="bl">build context lệch nhau, không chép được code chung</text>
+<text x="492" y="372" class="tag" text-anchor="end">G4 🟠</text>
+<rect x="780" y="354" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-app)" stroke-width="1.6"/>
+<text x="788" y="372" class="bn" font-size="13">docker/&lt;image&gt;/Dockerfile</text>
+<text x="788" y="388" class="bl">build context là gốc repo</text>
+<path d="M500,380.0 L778,380.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="374.0" class="lb" text-anchor="middle">gộp về một chỗ</text>
+<rect x="20" y="416" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="434" class="bn" font-size="13">(chưa có) tiện ích dùng chung</text>
+<text x="28" y="450" class="bl">SparkSession, WebHDFS, retry sẽ bị chép ở 5 nơi</text>
+<text x="492" y="434" class="tag" text-anchor="end">G5 🟠</text>
+<rect x="780" y="416" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-dom)" stroke-width="1.6"/>
+<text x="788" y="434" class="bn" font-size="13">src/stocklake/common/</text>
+<text x="788" y="450" class="bl">một bản, có test</text>
+<path d="M500,442.0 L778,442.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="436.0" class="lb" text-anchor="middle">thêm</text>
+<rect x="20" y="478" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="496" class="bn" font-size="13">infra/hadoop · infra/kafka · infra/spark</text>
+<text x="28" y="512" class="bl">chưa có chỗ cho cấu hình của ứng dụng</text>
+<text x="492" y="496" class="tag" text-anchor="end">G6 🟡</text>
+<rect x="780" y="478" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-app)" stroke-width="1.6"/>
+<text x="788" y="496" class="bn" font-size="13">conf/{hadoop,kafka,spark,app}/</text>
+<text x="788" y="512" class="bl">danh sách mã, nguồn, tốc độ gọi ở conf/app</text>
+<path d="M500,504.0 L778,504.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="498.0" class="lb" text-anchor="middle">tách cấu hình khỏi code</text>
+<rect x="20" y="540" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="558" class="bn" font-size="13">tests/ phẳng</text>
+<text x="28" y="574" class="bl">không tách test cần cụm với test chạy tại chỗ</text>
+<text x="492" y="558" class="tag" text-anchor="end">G7 🟡</text>
+<rect x="780" y="540" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="788" y="558" class="bn" font-size="13">tests/unit · integration · fixtures</text>
+<text x="788" y="574" class="bl">test không cần Spark chạy ở mọi máy</text>
+<path d="M500,566.0 L778,566.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="560.0" class="lb" text-anchor="middle">chia 3 nhóm</text>
+<rect x="20" y="602" width="480" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="28" y="620" class="bn" font-size="13">contracts/data_dictionary.md viết tay</text>
+<text x="28" y="636" class="bl">dễ lệch với schemas.py</text>
+<text x="492" y="620" class="tag" text-anchor="end">G8 🟡</text>
+<rect x="780" y="602" width="470" height="52" rx="6" fill="var(--box)" stroke="var(--s-data)" stroke-width="1.6"/>
+<text x="788" y="620" class="bn" font-size="13">docs/data_dictionary.md</text>
+<text x="788" y="636" class="bl">sinh từ schema trung lập bằng make docs</text>
+<path d="M500,628.0 L778,628.0" class="ar" marker-end="url(#ah)"/>
+<text x="640" y="622.0" class="lb" text-anchor="middle">sinh tự động</text>
+</svg></div>
+<p class="sub">Cột trái là cây thư mục của <code>Planning.md</code> trước 24/11, cộng hai điểm phát hiện khi rà lại (G9, G10). <code>Planning.md</code> hiện tại đã theo cột phải. Giữ nguyên: <code>benchmarks/</code>, <code>dashboard/</code>, <code>docker-compose.yml</code>, <code>Makefile</code>.</p>
+
+<h2>3. Trình tự: một thay đổi ETL đi từ feature branch tới cụm</h2>
+<div class="fig"><svg width="1270" height="556" viewBox="0 0 1270 556" role="img" aria-label="Một thay đổi code đi tới cụm">
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink2)"/></marker>
+<marker id="ahs" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M10,0 L0,5 L10,10 z" fill="var(--ink2)"/></marker>
+<marker id="dia" viewBox="0 0 12 8" refX="1" refY="4" markerWidth="13" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,4 L6,0 L12,4 L6,8 z" fill="var(--ink2)"/></marker>
+<marker id="ahv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto"><path d="M1,1 L9,5 L1,9" fill="none" stroke="var(--ink2)" stroke-width="1.6"/></marker>
+</defs>
+<line x1="68" y1="80" x2="68" y2="546" class="life"/>
+<rect x="4" y="8" width="128" height="72" rx="6" fill="var(--b-data)" stroke="var(--s-data)" stroke-width="1.4"/>
+<text x="68" y="31" class="bn" font-size="12" text-anchor="middle">Feature</text>
+<text x="68" y="45" class="bn" font-size="12" text-anchor="middle">branch</text>
+<text x="68" y="73" class="lb" text-anchor="middle">Máy cá nhân</text>
+<line x1="230" y1="80" x2="230" y2="546" class="life"/>
+<rect x="166" y="8" width="128" height="72" rx="6" fill="var(--b-data)" stroke="var(--s-data)" stroke-width="1.4"/>
+<text x="230" y="31" class="bn" font-size="12" text-anchor="middle">develop</text>
+<text x="230" y="45" class="bn" font-size="12" text-anchor="middle">(GitHub)</text>
+<text x="230" y="73" class="lb" text-anchor="middle">Git</text>
+<line x1="392" y1="80" x2="392" y2="546" class="life"/>
+<rect x="328" y="8" width="128" height="72" rx="6" fill="var(--b-app)" stroke="var(--s-app)" stroke-width="1.4"/>
+<text x="392" y="31" class="bn" font-size="12" text-anchor="middle">PC chung</text>
+<text x="392" y="45" class="bn" font-size="12" text-anchor="middle">Makefile</text>
+<text x="392" y="73" class="lb" text-anchor="middle">Vận hành</text>
+<line x1="554" y1="80" x2="554" y2="546" class="life"/>
+<rect x="490" y="8" width="128" height="72" rx="6" fill="var(--b-app)" stroke="var(--s-app)" stroke-width="1.4"/>
+<text x="554" y="31" class="bn" font-size="12" text-anchor="middle">Image</text>
+<text x="554" y="45" class="bn" font-size="12" text-anchor="middle">spark</text>
+<text x="554" y="73" class="lb" text-anchor="middle">Vận hành</text>
+<line x1="716" y1="80" x2="716" y2="546" class="life"/>
+<rect x="652" y="8" width="128" height="72" rx="6" fill="var(--b-pres)" stroke="var(--s-pres)" stroke-width="1.4"/>
+<text x="716" y="31" class="bn" font-size="12" text-anchor="middle">jobs/etl/</text>
+<text x="716" y="45" class="bn" font-size="12" text-anchor="middle">raw_to_clean.py</text>
+<text x="716" y="73" class="lb" text-anchor="middle">Điểm vào</text>
+<line x1="878" y1="80" x2="878" y2="546" class="life"/>
+<rect x="814" y="8" width="128" height="72" rx="6" fill="var(--b-appl)" stroke="var(--s-appl)" stroke-width="1.4"/>
+<text x="878" y="31" class="bn" font-size="12" text-anchor="middle">stocklake</text>
+<text x="878" y="45" class="bn" font-size="12" text-anchor="middle">.etl</text>
+<text x="878" y="73" class="lb" text-anchor="middle">Logic</text>
+<line x1="1040" y1="80" x2="1040" y2="546" class="life"/>
+<rect x="976" y="8" width="128" height="72" rx="6" fill="var(--b-dom)" stroke="var(--s-dom)" stroke-width="1.4"/>
+<text x="1040" y="31" class="bn" font-size="12" text-anchor="middle">stocklake</text>
+<text x="1040" y="45" class="bn" font-size="12" text-anchor="middle">.contracts</text>
+<text x="1040" y="73" class="lb" text-anchor="middle">Nền chung</text>
+<line x1="1202" y1="80" x2="1202" y2="546" class="life"/>
+<rect x="1138" y="8" width="128" height="72" rx="6" fill="var(--b-data)" stroke="var(--s-data)" stroke-width="1.4"/>
+<text x="1202" y="31" class="bn" font-size="12" text-anchor="middle">HDFS</text>
+<text x="1202" y="73" class="lb" text-anchor="middle">Cụm</text>
+<rect x="30" y="124" width="164" height="30" rx="4" class="note"/>
+<text x="112" y="138" class="lb" text-anchor="middle">pytest -m &quot;not spark&quot;</text>
+<text x="112" y="151" class="lb" text-anchor="middle">test Spark: chạy trên PC</text>
+<text x="26" y="150" class="num" text-anchor="end">1</text>
+<path d="M68,190 L228,190" class="ar" marker-end="url(#ah)"/>
+<text x="149" y="184" class="lb" text-anchor="middle">merge vào develop</text>
+<text x="72" y="203" class="num" text-anchor="start">2</text>
+<path d="M230,230 L390,230" class="ar" marker-end="url(#ah)"/>
+<text x="311" y="224" class="lb" text-anchor="middle">git pull (qua SSH)</text>
+<text x="234" y="243" class="num" text-anchor="start">3</text>
+<path d="M392,278 L552,278" class="ar" marker-end="url(#ah)"/>
+<text x="473" y="258" class="lb" text-anchor="middle">make build:</text>
+<text x="473" y="272" class="lb" text-anchor="middle">wheel + jobs/ → image</text>
+<text x="396" y="291" class="num" text-anchor="start">4</text>
+<path d="M392,318 L714,318" class="ar" marker-end="url(#ah)"/>
+<text x="554" y="312" class="lb" text-anchor="middle">make etl → spark-submit</text>
+<text x="396" y="331" class="num" text-anchor="start">5</text>
+<path d="M716,358 L876,358" class="ar" marker-end="url(#ah)"/>
+<text x="797" y="352" class="lb" text-anchor="middle">run(spark, cfg)</text>
+<text x="720" y="371" class="num" text-anchor="start">6</text>
+<path d="M878,398 L1038,398" class="ar" marker-end="url(#ah)"/>
+<text x="959" y="392" class="lb" text-anchor="middle">lấy schema, đường dẫn</text>
+<text x="882" y="411" class="num" text-anchor="start">7</text>
+<path d="M1040,438 L880,438" class="ar da" marker-end="url(#ah)"/>
+<text x="959" y="432" class="lb" text-anchor="middle">to_spark() · /data/clean/…</text>
+<text x="1036" y="451" class="num" text-anchor="end">8</text>
+<path d="M878,478 L1200,478" class="ar" marker-end="url(#ah)"/>
+<text x="1040" y="472" class="lb" text-anchor="middle">đọc raw · ghi clean</text>
+<text x="882" y="491" class="num" text-anchor="start">9</text>
+<rect x="634" y="500" width="164" height="30" rx="4" class="note"/>
+<text x="716" y="514" class="lb" text-anchor="middle">job không có logic</text>
+<text x="716" y="527" class="lb" text-anchor="middle">nên bước 1 test đủ</text>
+<text x="630" y="526" class="num" text-anchor="end">10</text>
+</svg></div>
+<p class="sub">Nhánh <code>main</code> không nằm trong luồng này.</p>
+
+<h2>4. Tiêu chí chấm</h2>
+<table><tr><th>Tiêu chí</th><th>Đích</th><th>Trước</th><th>Chỗ trên hình 1</th></tr>
+<tr><td>Import được ở mọi nơi chạy code</td><td class="ok">Đạt</td><td class="no">Không (G1, G2)</td><td>Mũi tên <code>wheel</code> và <code>COPY</code></td></tr>
+<tr><td>Không có import vòng hay import chéo module</td><td class="ok">Đạt</td><td class="no">Không (G9)</td><td>Băng Nền chung: mọi mũi tên đi xuống</td></tr>
+<tr><td>Image không cài thừa thư viện</td><td class="ok">Đạt</td><td class="no">Không (G10)</td><td><code>pyproject.toml</code>, <code>docker/</code>, kênh phải</td></tr>
+<tr><td>Mỗi thư mục một chủ</td><td class="ok">Đạt</td><td class="ok">Đạt</td><td>Dòng ★; riêng <code>contracts/</code> dùng chung</td></tr>
+<tr><td>Test logic không cần cụm</td><td class="mid">Một phần</td><td class="no">Không (G3)</td><td>Kênh trái. Test Spark local vẫn cần Java và pyspark, nên máy ít đĩa phải chạy trên PC.</td></tr>
+<tr><td>Dựng lại bằng một lệnh</td><td class="ok">Đạt</td><td class="mid">Một phần (G4)</td><td>Băng Vận hành</td></tr>
+<tr><td>Đủ gọn cho đồ án 4 tuần</td><td class="mid">Một phần</td><td class="ok">Đạt</td><td>Thêm bước build wheel, lớp <code>jobs/</code> và hàm chuyển schema. <code>adr/</code>, <code>runbook.md</code>, CI để mức tối thiểu.</td></tr>
+</table>
+
+<h2>5. Lát đầu tiên</h2>
+<p>Phase 0 đẩy lên <code>develop</code>: <code>pyproject.toml</code> có 4 nhóm thư viện, <code>src/stocklake/contracts</code>, <code>common</code> và khung <code>sources</code>, <code>docker/</code>, <code>conf/</code>, <code>docker-compose.yml</code>, <code>Makefile</code>, test cho schema. Xong khi test không cần Spark chạy được ở mọi máy, <code>make test</code> và <code>make up</code> chạy được trên PC, và <code>import stocklake.contracts</code> chạy được trong image collector, dashboard.</p>
+<p class="sub">Tham khảo: <a href="https://packaging.python.org/discussions/src-layout-vs-flat-layout/">src layout (PyPA)</a> · <a href="https://github.com/alexioannides/pyspark-example-project">pyspark-example-project</a> · <a href="https://medium.com/developerzen/best-practices-writing-production-grade-pyspark-jobs-cb688ac4d20f">production-grade PySpark jobs</a> · <a href="https://cookiecutter-data-science.drivendata.org/opinions/">Cookiecutter Data Science</a>.</p>
+</main></body></html>
+<!-- archpage-source:IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJUcmFuZyBkdXnhu4d0IGPhuqV1IHRyw7pjIHJlcG8gYmlnX2RhdGFfcHJvamVjdCAoxJHhu5Mgw6FuIEPDtG5nIG5naOG7hyBk4buvIGxp4buHdSBs4bubbiwgS2Fma2HigJNTcGFya+KAk0hERlMpLgpIw6xuaCAxOiBj4bqldSB0csO6YyDEkcOtY2ggdGhlbyB04bqnbmcgcGjhu6UgdGh14buZYy4gSMOsbmggMjogY8OieSB0aMawIG3hu6VjIHRyb25nIFBsYW5uaW5nLm1kIG3hu6VjIDMuMSBzbyB24bubaSDEkcOtY2guCkjDrG5oIDM6IG3hu5l0IHRoYXkgxJHhu5VpIGNvZGUgxJFpIHThu6sgZmVhdHVyZSBicmFuY2ggdOG7m2kgam9iIGNo4bqheSB0csOqbiBj4bulbS4KQ2jhuqF5OiBweXRob24zIDxza2lsbD4vc2NyaXB0cy9hcmNocGFnZS5weSBydW4gYnVpbGRfcmVwb19zdHJ1Y3R1cmUucHkgPG91dC5odG1sPgoiIiIKaW1wb3J0IHN5cwppbXBvcnQgYXJjaHBhZ2UgYXMgYXAKZnJvbSBhcmNocGFnZSBpbXBvcnQgKgoKCmRlZiBteV9sZWdlbmQobywgeSwgeD0xNTApOgogICAgYXAuX2xlZ2VuZCA9IFRydWUKICAgIG8uYXBwZW5kKGFycm93KFsoeCwgeS00KSwgKHgrNDYsIHktNCldKSk7IG8uYXBwZW5kKGxhYmVsKHgrNTQsIHksICJpbXBvcnQgLyBn4buNaSAoY2jhu4kgxJFpIHh14buRbmcpIiwgInN0YXJ0IikpCiAgICBvLmFwcGVuZChvd24oWyh4KzI1MCwgeS00KSwgKHgrMjk2LCB5LTQpXSkpOyBvLmFwcGVuZChsYWJlbCh4KzMwNCwgeSwgIsSRw7NuZyBnw7NpIHbDoG8gaW1hZ2UiLCAic3RhcnQiKSkKICAgIG8uYXBwZW5kKGRhdGEoWyh4KzQ1MCwgeS00KSwgKHgrNDk2LCB5LTQpXSkpOyBvLmFwcGVuZChsYWJlbCh4KzUwNCwgeSwgImPhuqV1IGjDrG5oIC8gdMOgaSBsaeG7h3Ugc2luaCByYSIsICJzdGFydCIpKQogICAgby5hcHBlbmQoYXJyb3coWyh4KzcwMCwgeS00KSwgKHgrNzQ2LCB5LTQpXSwgZGFzaGVkPVRydWUpKTsgby5hcHBlbmQobGFiZWwoeCs3NTQsIHksICJraeG7g20gdGjhu60iLCAic3RhcnQiKSkKICAgIG8uYXBwZW5kKGxhYmVsKHgsIHkrMjYsICLimIUgdGjDoG5oIHZpw6puIMSR4bupbmcgdMOqbiBjb21taXQgY+G7p2EgdGjGsCBt4bulYyDEkcOzIiwgInN0YXJ0IiwgInN0IikpCiAgICBvLmFwcGVuZChsYWJlbCh4KzMwMCwgeSsyNiwgInTDqm4gY8OzIGThuqV1IC8g4bufIGN14buRaSA9IHRoxrAgbeG7pWMiLCAic3RhcnQiKSkKCgpkZWYgZmlnMSgpOgogICAgVywgSCA9IDEyNzAsIDg5MAogICAgbyA9IGZpZ19vcGVuKFcsIEgsICJD4bqldSB0csO6YyByZXBvIMSRw61jaCIpCiAgICBiYW5kcyhvLCBXLCBbKCJhcHAiLCAxMCwgMTMwLCAiVuG6rW4gaMOgbmgiKSwgKCJwcmVzIiwgMTUwLCAxMjAsICLEkGnhu4NtIHbDoG8iKSwKICAgICAgICAgICAgICAgICAoImFwcGwiLCAyODAsIDE0MCwgIkxvZ2ljIiksICgiZG9tIiwgNDMwLCAyNTAsICJO4buBbiBjaHVuZyIpLAogICAgICAgICAgICAgICAgICgiZGF0YSIsIDY5MCwgMTEwLCAiS2nhu4NtIGNo4bupbmciKV0pCiAgICAjIC0tLS0gVuG6rW4gaMOgbmgKICAgIG8uYXBwZW5kKGJveCgxNTAsIDUyLCAxNjAsIDc4LCAiTWFrZWZpbGUiLCBbIuKYhSBIw7luZyBExrDGoW5nIiwgInVwIMK3IGhlYWx0aCDCtyBlMmUiLCAiYmVuY2gtKiDCtyB0ZXN0IMK3IGxpbnQiXSwgImFwcCIpKQogICAgby5hcHBlbmQoYm94KDM1MCwgNTIsIDIwMCwgNzgsICJkb2NrZXItY29tcG9zZS55bWwiLCBbIuKYhSBIw7luZyBExrDGoW5nIiwgIm1lbV9saW1pdCwgY3B1cyB04burbmcgZOG7i2NoIHbhu6UiLCAicHJvZmlsZXMgdzEgwrcgdzIgwrcgdzMiXSwgImFwcCIpKQogICAgby5hcHBlbmQoYm94KDU5MCwgNTIsIDE4MCwgNzgsICJkb2NrZXIvIiwgWyLimIUgSMO5bmcgRMawxqFuZyIsICIzIERvY2tlcmZpbGU6IHNwYXJrLCIsICJjb2xsZWN0b3IsIGRhc2hib2FyZCJdLCAiYXBwIikpCiAgICBvLmFwcGVuZChib3goODEwLCA1MiwgMTgwLCA3OCwgInB5cHJvamVjdC50b21sIiwgWyLimIUgSMO5bmcgRMawxqFuZyIsICJuaMOzbSB0aMawIHZp4buHbjogc3BhcmsgwrciLCAiY29sbGVjdG9yIMK3IGRhc2hib2FyZCDCtyBkZXYiXSwgImFwcCIpKQogICAgby5hcHBlbmQoYm94KDEwMzAsIDUyLCAxOTAsIDc4LCAiY29uZi8iLCBbIuKYhSBIw7luZyBExrDGoW5nIiwgImhhZG9vcC8gwrcga2Fma2EvIMK3IHNwYXJrLyIsICJhcHAvOiBtw6MsIG5ndeG7k24sIHThu5FjIMSR4buZIGfhu41pIl0sICJhcHAiKSkKICAgIG8uYXBwZW5kKGFycm93KFsoMzEwLCA5MSksICgzNDgsIDkxKV0pKTsgby5hcHBlbmQobGFiZWwoMzMwLCA4NCwgImfhu41pIikpCiAgICBvLmFwcGVuZChhcnJvdyhbKDU1MCwgOTEpLCAoNTg4LCA5MSldKSk7IG8uYXBwZW5kKGxhYmVsKDU3MCwgODQsICJidWlsZCIpKQogICAgby5hcHBlbmQoZGF0YShbKDgxMCwgOTEpLCAoNzcyLCA5MSldKSk7IG8uYXBwZW5kKGxhYmVsKDc5MSwgODQsICJ3aGVlbCIpKQogICAgby5hcHBlbmQoZGF0YShbKDExMjUsIDUyKSwgKDExMjUsIDM4KSwgKDQ1MCwgMzgpLCAoNDUwLCA1MCldKSk7IG8uYXBwZW5kKGxhYmVsKDc5MCwgMzMsICJtb3VudCBj4bqldSBow6xuaCB2w6BvIGNvbnRhaW5lciIpKQogICAgIyAtLS0tIMSQaeG7g20gdsOgbwogICAgby5hcHBlbmQoYm94KDE1MCwgMTc4LCA0MjAsIDc4LCAiam9icy8iLCBbImluZ2VzdC8gwrcgc3RyZWFtaW5nLyDCtyBldGwvIMK3IGRxLyDCtyBhbmFseXRpY3MvIChjaOG7pyB0aGVvIG1vZHVsZSkiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIm3hu5dpIGZpbGU6IMSR4buNYyB0aGFtIHPhu5Eg4oaSIGfhu41pIDEgaMOgbSB0cm9uZyBzdG9ja2xha2UiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgImtow7RuZyBjaOG7qWEgbG9naWM7IGNo4bqheSBi4bqxbmcgc3Bhcmstc3VibWl0IGhv4bq3YyBweXRob24iXSwgInByZXMiKSkKICAgIG8uYXBwZW5kKGJveCg2MTAsIDE3OCwgMjkwLCA3OCwgImJlbmNobWFya3MvIiwgWyJzdG9yYWdlLyDCtyBzY2FsZW91dC8gwrcgc3RyZWFtaW5nLyDCtyIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAiZmF1bHRfdG9sZXJhbmNlLyDCtyBzdW1tYXJ5LyIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAicmVzdWx0cy86IENTViwgSlNPTiwgUE5HIGPDsyBjb21taXQiXSwgInByZXMiKSkKICAgIG8uYXBwZW5kKGJveCg5NDAsIDE3OCwgMjgwLCA3OCwgImRhc2hib2FyZC8iLCBbIuKYhSBUaGFuaCIsICJhcHAucHkgwrcgcGFnZXMvIChTdHJlYW1saXQpIiwgIsSR4buNYyBjdXJhdGVkIHF1YSBXZWJIREZTIl0sICJwcmVzIikpCiAgICBvLmFwcGVuZChvd24oWyg2NDAsIDEzMCksICg2NDAsIDE1NCksICg1MDAsIDE1NCksICg1MDAsIDE3NildKSk7IG8uYXBwZW5kKGxhYmVsKDUwNiwgMTcwLCAiQ09QWSBqb2JzLyArIHdoZWVsIiwgInN0YXJ0IikpCiAgICBvLmFwcGVuZChhcnJvdyhbKDYxMCwgMjE3KSwgKDU3MiwgMjE3KV0pKTsgby5hcHBlbmQobGFiZWwoNTkxLCAyMTAsICJjaOG6oXkiKSkKICAgICMgLS0tLSBMb2dpYzogc3JjL3N0b2NrbGFrZS8KICAgIG1vZHMgPSBbKCJzcmMvc3RvY2tsYWtlL2luZ2VzdGlvbi8iLCBbIuKYhSBI4buTbmcgRMawxqFuZyIsICJmcmFtZXdvcmsvOiBmYWxsYmFjaywgc3RhdGUiLCAiY29sbGVjdG9ycy86IGPDoWMgam9iIGJhdGNoIl0pLAogICAgICAgICAgICAoInNyYy9zdG9ja2xha2Uvc3RyZWFtaW5nLyIsIFsi4piFIFR1eeG7gW4iLCAicHJvZHVjZXJzLzogaW50cmFkYXksIHJzcywiLCAicmVwbGF5IMK3IHNpbmtzLzogS2Fma2Eg4oaSIHJhdyJdKSwKICAgICAgICAgICAgKCJzcmMvc3RvY2tsYWtlL2V0bC8iLCBbIuKYhSBIw7luZyBExrDGoW5nIiwgInJhd190b19jbGVhbi8gwrcgY29tcGFjdGlvbi8iLCAiaMOgbSBEYXRhRnJhbWUg4oaSIERhdGFGcmFtZSJdKSwKICAgICAgICAgICAgKCJzcmMvc3RvY2tsYWtlL2RxLyIsIFsi4piFIEjhu5NuZyBExrDGoW5nIiwgImNoZWNrcy86IDUgbmjDs20ga2nhu4NtIHRyYSIsICJyZXBvcnQucHkg4oaSIGRxX3JlcG9ydCJdKSwKICAgICAgICAgICAgKCJzcmMvc3RvY2tsYWtlL2FuYWx5dGljcy8iLCBbIuKYhSBUaGFuaCIsICJjdXJhdGVkLyDCtyBzcWwvIiwgIm1sLzogYmFzZWxpbmUsIGxlYWthZ2UgdGVzdCJdKV0KICAgIHhzID0gWzE1MCwgMzY3LCA1ODQsIDgwMSwgMTAxOF0KICAgIGZvciB4LCAobiwgbHMpIGluIHppcCh4cywgbW9kcyk6CiAgICAgICAgby5hcHBlbmQoYm94KHgsIDMyMCwgMjAyLCA3OCwgbiwgbHMsICJhcHBsIikpCiAgICAgICAgby5hcHBlbmQoYXJyb3coWyh4ICsgMTAxLCAyOTIpLCAoeCArIDEwMSwgMzE4KV0pKQogICAgby5hcHBlbmQocGF0aCgiTTM2MCwyNTYgTDM2MCwyOTIgTTI1MSwyOTIgTDExMTksMjkyIikpCiAgICBvLmFwcGVuZChsYWJlbCgzNjYsIDI3NiwgImltcG9ydDogbeG7l2kgam9iIGfhu41pIDEgaMOgbSIsICJzdGFydCIpKQogICAgIyAtLS0tIE7hu4FuIGNodW5nOiBzb3VyY2VzIOG7nyBow6BuZyB0csOqbiwgY29tbW9uICsgY29udHJhY3RzIOG7nyBow6BuZyBkxrDhu5tpCiAgICBvLmFwcGVuZChib3goMzAwLCA0NTIsIDM3MCwgNzgsICJzcmMvc3RvY2tsYWtlL3NvdXJjZXMvIiwgWyLimIUgSOG7k25nIETGsMahbmciLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJjbGllbnQgZ+G7jWkgbmd14buTbiArIHBow6JuIHTDrWNoIGvhur90IHF14bqjIHRy4bqjIHbhu4EiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJ2Y2kgwrcgdm5kaXJlY3Qgwrcga2JzIMK3IGNhZmVmIMK3IHlhaG9vIMK3IGZyZWQgwrcgcnNzIl0sICJkb20iKSkKICAgIG8uYXBwZW5kKGJveCgxNTAsIDU2OCwgNTAwLCA3OCwgInNyYy9zdG9ja2xha2UvY29tbW9uLyIsIFsi4piFIEjDuW5nIETGsMahbmciLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgImNvbmZpZy5weSDCtyBzcGFyay5weSDCtyBoZGZzLnB5IChXZWJIREZTKSDCtyBsb2dnaW5nLnB5IiwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJodHRwLnB5OiByZXRyeSwgYmFja29mZiwgZ2nhu5tpIGjhuqFuIHThu5FjIMSR4buZIGTDuW5nIGNodW5nIl0sICJkb20iKSkKICAgIG8uYXBwZW5kKGJveCg3MDAsIDU2OCwgNTIwLCA3OCwgInNyYy9zdG9ja2xha2UvY29udHJhY3RzLyIsIFsi4piFIGPhuqMgbmjDs206IHPhu61hIHBo4bqjaSBiw6FvLCBjb21taXQgcmnDqm5nIiwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJzY2hlbWFzLnB5ICh0cnVuZyBs4bqtcCwgUHl0aG9uIHRodeG6p24pIMK3IGNvbnZlcnQucHkg4oaSIFNwYXJrLCBweWFycm93IiwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJ0b3BpY3MucHkgwrcgcGF0aHMucHkgwrcgYXZhaWxhYmxlX2F0LnB5Il0sICJkb20iKSkKICAgIG8uYXBwZW5kKHBhdGgoIk0yNTEsMzk4IEwyNTEsNDI0IE00NjgsMzk4IEw0NjgsNDI0IE02ODUsMzk4IEw2ODUsNDI0IE05MDIsMzk4IEw5MDIsNDI0IE0xMTE5LDM5OCBMMTExOSw0MjQgTTIyNSw0MjQgTDExMTksNDI0IikpCiAgICBvLmFwcGVuZChhcnJvdyhbKDIyNSwgNDI0KSwgKDIyNSwgNTY2KV0pKTsgby5hcHBlbmQoYXJyb3coWyg0ODUsIDQyNCksICg0ODUsIDQ1MCldKSk7IG8uYXBwZW5kKGFycm93KFsoOTYwLCA0MjQpLCAoOTYwLCA1NjYpXSkpCiAgICBvLmFwcGVuZChsYWJlbCg0OTEsIDQ0NCwgImltcG9ydCDCtyA1IG1vZHVsZSBraMO0bmcgaW1wb3J0IGzhuqtuIG5oYXUiLCAic3RhcnQiKSkKICAgIG8uYXBwZW5kKGFycm93KFsoNDg1LCA1MzApLCAoNDg1LCA1NjYpXSkpCiAgICBvLmFwcGVuZChhcnJvdyhbKDY0MCwgNTMwKSwgKDY0MCwgNTQ4KSwgKDgwMCwgNTQ4KSwgKDgwMCwgNTY2KV0pKQogICAgby5hcHBlbmQobGFiZWwoNDkxLCA1NTMsICJpbXBvcnQiLCAic3RhcnQiKSkKICAgIG8uYXBwZW5kKGFycm93KFsoNjUwLCA2MDcpLCAoNjk4LCA2MDcpXSkpOyBvLmFwcGVuZChsYWJlbCg2NzQsIDYwMCwgImltcG9ydCIpKQogICAgby5hcHBlbmQoYXJyb3coWygxMjIwLCAyMTcpLCAoMTI0NSwgMjE3KSwgKDEyNDUsIDYwNyksICgxMjIyLCA2MDcpXSkpCiAgICBvLmFwcGVuZCh2bGFiZWwoMTI1OSwgNDEwLCAiaW1wb3J0IGNvbnRyYWN0cyAoa2jDtG5nIGPhuqduIHB5c3BhcmspIikpCiAgICAjIC0tLS0gS2nhu4NtIGNo4bupbmcKICAgIG8uYXBwZW5kKGJveCgxNTAsIDcxMiwgMzMwLCA3OCwgInRlc3RzLyIsIFsidW5pdC86IGtow7RuZyBj4bqnbiBj4bulbTsgdGVzdCBTcGFyayDEkcOhbmggZOG6pXUgc3BhcmsiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJpbnRlZ3JhdGlvbi86IGPhuqduIGPhu6VtLCBjaOG6oXkgdHLDqm4gUEMiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJmaXh0dXJlcy86IG3huqt1IEpTT04gdGjhuq10IGPhu6dhIHThu6tuZyBuZ3Xhu5NuIl0sICJkYXRhIikpCiAgICBvLmFwcGVuZChib3goNTIwLCA3MTIsIDI4MCwgNzgsICIuZ2l0aHViL3dvcmtmbG93cy8iLCBbImNpLnltbDogcnVmZiArIHB5dGVzdCBraMO0bmcgY+G6p24gU3BhcmsiLCAia2hpIHB1c2ggbMOqbiBkZXZlbG9wIiwgIih0deG7syBjaOG7jW4sIG3hu6ljIHThu5FpIHRoaeG7g3UpIl0sICJkYXRhIikpCiAgICBvLmFwcGVuZChib3goODQwLCA3MTIsIDM4MCwgNzgsICJkb2NzLyIsIFsiUGxhbm5pbmcubWQgwrcgcnVuYm9vay5tZCwgYWRyLyAobeG7qWMgdOG7kWkgdGhp4buDdSkiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgImRhdGFfZGljdGlvbmFyeS5tZDogc2luaCB04burIHNjaGVtYSB0cnVuZyBs4bqtcCJdLCAiZGF0YSIpKQogICAgby5hcHBlbmQoYXJyb3coWygxNTAsIDc1MSksICgxMzgsIDc1MSksICgxMzgsIDM1OSksICgxNDgsIDM1OSldLCBkYXNoZWQ9VHJ1ZSkpCiAgICBvLmFwcGVuZCh2bGFiZWwoMTE4LCA1NjAsICJraeG7g20gdGjhu606IGltcG9ydCBzdG9ja2xha2UiKSkKICAgIG8uYXBwZW5kKGFycm93KFsoNTIwLCA3NTEpLCAoNDgyLCA3NTEpXSkpOyBvLmFwcGVuZChsYWJlbCg1MDEsIDc0NCwgImNo4bqheSIpKQogICAgby5hcHBlbmQoZGF0YShbKDEwMDAsIDY0NiksICgxMDAwLCA3MTApXSkpOyBvLmFwcGVuZChsYWJlbCgxMDA2LCA2ODQsICJtYWtlIGRvY3MiLCAic3RhcnQiKSkKICAgIG15X2xlZ2VuZChvLCA4MzApCiAgICByZXR1cm4gZmlnX2Nsb3NlKG8sIG1heF9ib3hlcz0zMCkKCgpkZWYgZmlnMigpOgogICAgcm93cyA9IFsKICAgICAgICAoImNvbnRyYWN0cy8g4bufIGfhu5FjIHJlcG8iLCAiam9iIFNwYXJrIHbDoCAzIGltYWdlIGtow7RuZyBjw7MgY8OhY2ggaW1wb3J0IGNodW5nIiwgIkcxIPCflLQiLCAiZOG7nWkgdsOgbyBwYWNrYWdlIiwKICAgICAgICAgInNyYy9zdG9ja2xha2UvY29udHJhY3RzLyIsICLEkWkgdGhlbyB3aGVlbCB2w6BvIG3hu41pIGltYWdlIiwgImRvbSIpLAogICAgICAgICgiaW5nZXN0aW9uL3NvdXJjZXMvIChjbGllbnQgVkNJLCBSU1MsIOKApikiLCAic3RyZWFtaW5nIGPFqW5nIHBo4bqjaSBn4buNaSBWQ0kgbmjGsG5nIGtow7RuZyDEkcaw4bujYyBpbXBvcnQgaW5nZXN0aW9uIiwgIkc5IPCfn6AiLCAidMOhY2ggdGjDoG5oIG1vZHVsZSIsCiAgICAgICAgICJzcmMvc3RvY2tsYWtlL3NvdXJjZXMvIiwgImluZ2VzdGlvbiB2w6Agc3RyZWFtaW5nIGPDuW5nIGTDuW5nIiwgImRvbSIpLAogICAgICAgICgic2NoZW1hcy5weSB2aeG6v3QgYuG6sW5nIFN0cnVjdFR5cGUiLCAiaW1wb3J0IGNvbnRyYWN0cyBsw6AgcGjhuqNpIGPDoGkgcHlzcGFyayIsICJHMTAg8J+foCIsICLEkeG7lWkgY8OhY2gga2hhaSBiw6FvIiwKICAgICAgICAgInNjaGVtYXMucHkgdHJ1bmcgbOG6rXAgKyBjb252ZXJ0LnB5IiwgInB5c3BhcmssIHB5YXJyb3cgY2jhu4kgaW1wb3J0IHRyb25nIGjDoG0gY2h1eeG7g24iLCAiZG9tIiksCiAgICAgICAgKCJpbmdlc3Rpb24vIGRxLyBzdHJlYW1pbmcvIGV0bC8gYW5hbHl0aWNzLyDhu58gZ+G7kWMiLCAiNSB0aMawIG3hu6VjIHLhu51pLCBraMO0bmcgY8OgaSDEkcaw4bujYyBi4bqxbmcgcGlwIiwgIkcyIPCflLQiLCAiZ+G7mXAgdGjDoG5oIDEgcGFja2FnZSIsCiAgICAgICAgICJzcmMvc3RvY2tsYWtlLzxtb2R1bGU+LyIsICJwaXAgaW5zdGFsbCAtZSAuIGzDoCBpbXBvcnQgxJHGsOG7o2Mg4bufIG3hu41pIG7GoWkiLCAiYXBwbCIpLAogICAgICAgICgiaW5nZXN0aW9uL2pvYnMvIMK3IHN0cmVhbWluZy9qb2JzLyIsICLEkWnhu4NtIHbDoG8gbuG6sW0gbOG6q24gduG7m2kgbG9naWMiLCAiRzMg8J+foCIsICJ0w6FjaCDEkWnhu4NtIHbDoG8iLAogICAgICAgICAiam9icy88bW9kdWxlPi8qLnB5IiwgIm3hu49uZzsgbG9naWMgbMOgIGjDoG0gdGVzdCDEkcaw4bujYyB0cm9uZyBzdG9ja2xha2UiLCAicHJlcyIpLAogICAgICAgICgiRG9ja2VyZmlsZSDhu58gaW5nZXN0aW9uLywgZGFzaGJvYXJkLywgaW5mcmEvc3BhcmsvIiwgImJ1aWxkIGNvbnRleHQgbOG7h2NoIG5oYXUsIGtow7RuZyBjaMOpcCDEkcaw4bujYyBjb2RlIGNodW5nIiwgIkc0IPCfn6AiLCAiZ+G7mXAgduG7gSBt4buZdCBjaOG7lyIsCiAgICAgICAgICJkb2NrZXIvPGltYWdlPi9Eb2NrZXJmaWxlIiwgImJ1aWxkIGNvbnRleHQgbMOgIGfhu5FjIHJlcG8iLCAiYXBwIiksCiAgICAgICAgKCIoY2jGsGEgY8OzKSB0aeG7h24gw61jaCBkw7luZyBjaHVuZyIsICJTcGFya1Nlc3Npb24sIFdlYkhERlMsIHJldHJ5IHPhur0gYuG7iyBjaMOpcCDhu58gNSBuxqFpIiwgIkc1IPCfn6AiLCAidGjDqm0iLAogICAgICAgICAic3JjL3N0b2NrbGFrZS9jb21tb24vIiwgIm3hu5l0IGLhuqNuLCBjw7MgdGVzdCIsICJkb20iKSwKICAgICAgICAoImluZnJhL2hhZG9vcCDCtyBpbmZyYS9rYWZrYSDCtyBpbmZyYS9zcGFyayIsICJjaMawYSBjw7MgY2jhu5cgY2hvIGPhuqV1IGjDrG5oIGPhu6dhIOG7qW5nIGThu6VuZyIsICJHNiDwn5+hIiwgInTDoWNoIGPhuqV1IGjDrG5oIGto4buPaSBjb2RlIiwKICAgICAgICAgImNvbmYve2hhZG9vcCxrYWZrYSxzcGFyayxhcHB9LyIsICJkYW5oIHPDoWNoIG3Doywgbmd14buTbiwgdOG7kWMgxJHhu5kgZ+G7jWkg4bufIGNvbmYvYXBwIiwgImFwcCIpLAogICAgICAgICgidGVzdHMvIHBo4bqzbmciLCAia2jDtG5nIHTDoWNoIHRlc3QgY+G6p24gY+G7pW0gduG7m2kgdGVzdCBjaOG6oXkgdOG6oWkgY2jhu5ciLCAiRzcg8J+foSIsICJjaGlhIDMgbmjDs20iLAogICAgICAgICAidGVzdHMvdW5pdCDCtyBpbnRlZ3JhdGlvbiDCtyBmaXh0dXJlcyIsICJ0ZXN0IGtow7RuZyBj4bqnbiBTcGFyayBjaOG6oXkg4bufIG3hu41pIG3DoXkiLCAiZGF0YSIpLAogICAgICAgICgiY29udHJhY3RzL2RhdGFfZGljdGlvbmFyeS5tZCB2aeG6v3QgdGF5IiwgImThu4UgbOG7h2NoIHbhu5tpIHNjaGVtYXMucHkiLCAiRzgg8J+foSIsICJzaW5oIHThu7EgxJHhu5luZyIsCiAgICAgICAgICJkb2NzL2RhdGFfZGljdGlvbmFyeS5tZCIsICJzaW5oIHThu6sgc2NoZW1hIHRydW5nIGzhuq1wIGLhurFuZyBtYWtlIGRvY3MiLCAiZGF0YSIpLAogICAgXQogICAgcmV0dXJuIGNvbXBhcmVfZmlndXJlKHJvd3MsIGxlZnRfdGl0bGU9IlRyxrDhu5tjOiBjw6J5IHRoxrAgbeG7pWMgY8WpIiwgbGVmdF9iYW5kPSJkYXRhIikKCgpkZWYgZmlnMygpOgogICAgc2VxID0gU2VxdWVuY2UoWwogICAgICAgICgiZGV2IiwgWyJGZWF0dXJlIiwgImJyYW5jaCJdLCAiZGF0YSIsICJNw6F5IGPDoSBuaMOibiIpLAogICAgICAgICgiZ2l0IiwgWyJkZXZlbG9wIiwgIihHaXRIdWIpIl0sICJkYXRhIiwgIkdpdCIpLAogICAgICAgICgicGMiLCBbIlBDIGNodW5nIiwgIk1ha2VmaWxlIl0sICJhcHAiLCAiVuG6rW4gaMOgbmgiKSwKICAgICAgICAoImltZyIsIFsiSW1hZ2UiLCAic3BhcmsiXSwgImFwcCIsICJW4bqtbiBow6BuaCIpLAogICAgICAgICgiam9iIiwgWyJqb2JzL2V0bC8iLCAicmF3X3RvX2NsZWFuLnB5Il0sICJwcmVzIiwgIsSQaeG7g20gdsOgbyIpLAogICAgICAgICgicGtnIiwgWyJzdG9ja2xha2UiLCAiLmV0bCJdLCAiYXBwbCIsICJMb2dpYyIpLAogICAgICAgICgiY29uIiwgWyJzdG9ja2xha2UiLCAiLmNvbnRyYWN0cyJdLCAiZG9tIiwgIk7hu4FuIGNodW5nIiksCiAgICAgICAgKCJoZGZzIiwgWyJIREZTIl0sICJkYXRhIiwgIkPhu6VtIiksCiAgICBdLCBhcmlhPSJN4buZdCB0aGF5IMSR4buVaSBjb2RlIMSRaSB04bubaSBj4bulbSIpCiAgICBzZXEubm90ZSgiZGV2IiwgInB5dGVzdCAtbSBcIm5vdCBzcGFya1wiIiwgInRlc3QgU3Bhcms6IGNo4bqheSB0csOqbiBQQyIpCiAgICBzZXEubXNnKCJkZXYiLCAiZ2l0IiwgIm1lcmdlIHbDoG8gZGV2ZWxvcCIpCiAgICBzZXEubXNnKCJnaXQiLCAicGMiLCAiZ2l0IHB1bGwgKHF1YSBTU0gpIikKICAgIHNlcS5tc2coInBjIiwgImltZyIsICJtYWtlIGJ1aWxkOiIsIHRleHQyPSJ3aGVlbCArIGpvYnMvIOKGkiBpbWFnZSIpCiAgICBzZXEubXNnKCJwYyIsICJqb2IiLCAibWFrZSBldGwg4oaSIHNwYXJrLXN1Ym1pdCIpCiAgICBzZXEubXNnKCJqb2IiLCAicGtnIiwgInJ1bihzcGFyaywgY2ZnKSIpCiAgICBzZXEubXNnKCJwa2ciLCAiY29uIiwgImzhuqV5IHNjaGVtYSwgxJHGsOG7nW5nIGThuqtuIikKICAgIHNlcS5tc2coImNvbiIsICJwa2ciLCAidG9fc3BhcmsoKSDCtyAvZGF0YS9jbGVhbi/igKYiLCByZXQ9VHJ1ZSkKICAgIHNlcS5tc2coInBrZyIsICJoZGZzIiwgIsSR4buNYyByYXcgwrcgZ2hpIGNsZWFuIikKICAgIHNlcS5ub3RlKCJqb2IiLCAiam9iIGtow7RuZyBjw7MgbG9naWMiLCAibsOqbiBixrDhu5tjIDEgdGVzdCDEkeG7pyIpCiAgICByZXR1cm4gc2VxLnN2ZygpCgoKcGFnZSA9IFBhZ2UoCiAgICAiIiJD4bqldSB0csO6YyByZXBvIDxjb2RlPmJpZ19kYXRhX3Byb2plY3Q8L2NvZGU+OiBt4buZdCBwYWNrYWdlLCDEkWnhu4NtIHbDoG8gbeG7j25nIiIiLAogICAgIiIiQuG6o24gxJHDoyBkdXnhu4d0IDI0LzExLzIwMjYsIGto4bubcCB24bubaSA8Y29kZT5QbGFubmluZy5tZDwvY29kZT4gbeG7pWMgMy4xLiBDaMawYSBjw7MgY29kZS4iIiIsCiAgICBzaG9ydF90aXRsZT0iQ+G6pXUgdHLDumMgcmVwbyIpCnBhZ2Uuc2VjdGlvbigiIiIxLiBD4bqldSB0csO6YyDEkcOtY2giIiIsIGZpZzEoKSwgIiIiCjx1bD4KPGxpPjxiPk3hu5l0IHBhY2thZ2UgY8OgaSDEkcaw4bujYy48L2I+IE3hu41pIGxvZ2ljIG7hurFtIHRyb25nIDxjb2RlPnNyYy9zdG9ja2xha2UvPC9jb2RlPiwga2hhaSBiw6FvIGLhurFuZyBt4buZdCA8Y29kZT5weXByb2plY3QudG9tbDwvY29kZT4uIENvbGxlY3RvciwgU3BhcmssIGRhc2hib2FyZCB2w6AgdGVzdCBpbXBvcnQgY8O5bmcgbeG7mXQgYuG6o24uPC9saT4KPGxpPjxiPk3hu5dpIGltYWdlIGPDoGkgbeG7mXQgbmjDs20gdGjGsCB2aeG7h24uPC9iPiA8Y29kZT5zdG9ja2xha2Vbc3BhcmtdPC9jb2RlPiwgPGNvZGU+W2NvbGxlY3Rvcl08L2NvZGU+LCA8Y29kZT5bZGFzaGJvYXJkXTwvY29kZT4sIHRow6ptIDxjb2RlPmRldjwvY29kZT4gY2hvIHRlc3QuIE5ow7NtIDxjb2RlPnNwYXJrPC9jb2RlPiBraMO0bmcga8OpbyBweXNwYXJrIHbDrCBpbWFnZSA8Y29kZT5hcGFjaGUvc3Bhcms8L2NvZGU+IMSRw6MgY8OzOyBweXNwYXJrIG7hurFtIOG7nyA8Y29kZT5kZXY8L2NvZGU+LCBnaGltIGPDuW5nIHBoacOqbiBi4bqjbi48L2xpPgo8bGk+PGI+U2NoZW1hIHRydW5nIGzhuq1wLjwvYj4gPGNvZGU+c2NoZW1hcy5weTwvY29kZT4gbMOgIFB5dGhvbiB0aHXhuqduICh0w6puIGPhu5l0LCBraeG7g3UsIG51bGxhYmxlLCBraG/DoSBjaMOtbmgsIG3DtCB04bqjKS4gPGNvZGU+Y29udmVydC5weTwvY29kZT4gY2h1eeG7g24gc2FuZyBTcGFyayB2w6AgcHlhcnJvdywgY2jhu4kgaW1wb3J0IGhhaSB0aMawIHZp4buHbiDEkcOzIGLDqm4gdHJvbmcgaMOgbS4gQ29sbGVjdG9yIHbDoCBkYXNoYm9hcmQga2jDtG5nIHBo4bqjaSBjw6BpIHB5c3BhcmsuPC9saT4KPGxpPjxiPlF1eSB04bqvYyBwaOG7pSB0aHXhu5ljLjwvYj4gTsSDbSBtb2R1bGUgbG9naWMga2jDtG5nIGltcG9ydCBs4bqrbiBuaGF1OyBjaOG7iSBwaOG7pSB0aHXhu5ljIDxjb2RlPmNvbnRyYWN0czwvY29kZT4sIDxjb2RlPmNvbW1vbjwvY29kZT4gdsOgIDxjb2RlPnNvdXJjZXM8L2NvZGU+LiA8Y29kZT5zb3VyY2VzPC9jb2RlPiBjaOG7iSBwaOG7pSB0aHXhu5ljIDxjb2RlPmNvbnRyYWN0czwvY29kZT4gdsOgIDxjb2RlPmNvbW1vbjwvY29kZT4uIE5o4budIHbhuq15IHByb2R1Y2VyIGdpw6EgcGjDunQgY+G7p2EgPGNvZGU+c3RyZWFtaW5nPC9jb2RlPiBn4buNaSDEkcaw4bujYyBWQ0kgbcOgIGtow7RuZyDEkeG7pW5nIDxjb2RlPmluZ2VzdGlvbjwvY29kZT4uPC9saT4KPGxpPjxiPsSQaeG7g20gdsOgbyBt4buPbmcuPC9iPiBGaWxlIHRyb25nIDxjb2RlPmpvYnMvPC9jb2RlPiBjaOG7iSDEkeG7jWMgdGhhbSBz4buRIHLhu5NpIGfhu41pIG3hu5l0IGjDoG0sIG7Dqm4gbG9naWMgdGVzdCDEkcaw4bujYyBi4bqxbmcgU3BhcmsgbG9jYWwuPC9saT4KPGxpPjxiPk1vdW50IGNvZGUga2hpIHBow6F0IHRyaeG7g24uPC9iPiBNb3VudCA8Y29kZT5zcmMvPC9jb2RlPiB2w6AgPGNvZGU+am9icy88L2NvZGU+IGNobyBj4bqjIHdvcmtlciBs4bqrbiBkcml2ZXI7IGNo4buJIG1vdW50IGRyaXZlciB0aMOsIGV4ZWN1dG9yIHbhuqtuIGNo4bqheSBi4bqjbiBjxakgdHJvbmcgd2hlZWwuPC9saT4KPC91bD4KIiIiKQpwYWdlLnNlY3Rpb24oIiIiMi4gVHLGsOG7m2MgdsOgIHNhdSIiIiwgZmlnMigpLCAiIiIKPHAgY2xhc3M9InN1YiI+Q+G7mXQgdHLDoWkgbMOgIGPDonkgdGjGsCBt4bulYyBj4bunYSA8Y29kZT5QbGFubmluZy5tZDwvY29kZT4gdHLGsOG7m2MgMjQvMTEsIGPhu5luZyBoYWkgxJFp4buDbSBwaMOhdCBoaeG7h24ga2hpIHLDoCBs4bqhaSAoRzksIEcxMCkuIDxjb2RlPlBsYW5uaW5nLm1kPC9jb2RlPiBoaeG7h24gdOG6oWkgxJHDoyB0aGVvIGPhu5l0IHBo4bqjaS4gR2nhu68gbmd1ecOqbjogPGNvZGU+YmVuY2htYXJrcy88L2NvZGU+LCA8Y29kZT5kYXNoYm9hcmQvPC9jb2RlPiwgPGNvZGU+ZG9ja2VyLWNvbXBvc2UueW1sPC9jb2RlPiwgPGNvZGU+TWFrZWZpbGU8L2NvZGU+LjwvcD4KIiIiKQpwYWdlLnNlY3Rpb24oIiIiMy4gVHLDrG5oIHThu7E6IG3hu5l0IHRoYXkgxJHhu5VpIEVUTCDEkWkgdOG7qyBmZWF0dXJlIGJyYW5jaCB04bubaSBj4bulbSIiIiwgZmlnMygpLCAiIiIKPHAgY2xhc3M9InN1YiI+TmjDoW5oIDxjb2RlPm1haW48L2NvZGU+IGtow7RuZyBu4bqxbSB0cm9uZyBsdeG7k25nIG7DoHkuPC9wPgoiIiIpCnBhZ2Uuc2VjdGlvbigiIiI0LiBUacOqdSBjaMOtIGNo4bqlbSIiIiwgTm9uZSwgIiIiCjx0YWJsZT48dHI+PHRoPlRpw6p1IGNow608L3RoPjx0aD7EkMOtY2g8L3RoPjx0aD5Ucsaw4bubYzwvdGg+PHRoPkNo4buXIHRyw6puIGjDrG5oIDE8L3RoPjwvdHI+Cjx0cj48dGQ+SW1wb3J0IMSRxrDhu6NjIOG7nyBt4buNaSBuxqFpIGNo4bqheSBjb2RlPC90ZD48dGQgY2xhc3M9Im9rIj7EkOG6oXQ8L3RkPjx0ZCBjbGFzcz0ibm8iPktow7RuZyAoRzEsIEcyKTwvdGQ+PHRkPk3FqWkgdMOqbiA8Y29kZT53aGVlbDwvY29kZT4gdsOgIDxjb2RlPkNPUFk8L2NvZGU+PC90ZD48L3RyPgo8dHI+PHRkPktow7RuZyBjw7MgaW1wb3J0IHbDsm5nIGhheSBpbXBvcnQgY2jDqW8gbW9kdWxlPC90ZD48dGQgY2xhc3M9Im9rIj7EkOG6oXQ8L3RkPjx0ZCBjbGFzcz0ibm8iPktow7RuZyAoRzkpPC90ZD48dGQ+QsSDbmcgTuG7gW4gY2h1bmc6IG3hu41pIG3FqWkgdMOqbiDEkWkgeHXhu5FuZzwvdGQ+PC90cj4KPHRyPjx0ZD5JbWFnZSBraMO0bmcgY8OgaSB0aOG7q2EgdGjGsCB2aeG7h248L3RkPjx0ZCBjbGFzcz0ib2siPsSQ4bqhdDwvdGQ+PHRkIGNsYXNzPSJubyI+S2jDtG5nIChHMTApPC90ZD48dGQ+PGNvZGU+cHlwcm9qZWN0LnRvbWw8L2NvZGU+LCA8Y29kZT5kb2NrZXIvPC9jb2RlPiwga8OqbmggcGjhuqNpPC90ZD48L3RyPgo8dHI+PHRkPk3hu5dpIHRoxrAgbeG7pWMgbeG7mXQgY2jhu6c8L3RkPjx0ZCBjbGFzcz0ib2siPsSQ4bqhdDwvdGQ+PHRkIGNsYXNzPSJvayI+xJDhuqF0PC90ZD48dGQ+RMOybmcg4piFOyByacOqbmcgPGNvZGU+Y29udHJhY3RzLzwvY29kZT4gZMO5bmcgY2h1bmc8L3RkPjwvdHI+Cjx0cj48dGQ+VGVzdCBsb2dpYyBraMO0bmcgY+G6p24gY+G7pW08L3RkPjx0ZCBjbGFzcz0ibWlkIj5N4buZdCBwaOG6p248L3RkPjx0ZCBjbGFzcz0ibm8iPktow7RuZyAoRzMpPC90ZD48dGQ+S8OqbmggdHLDoWkuIFRlc3QgU3BhcmsgbG9jYWwgduG6q24gY+G6p24gSmF2YSB2w6AgcHlzcGFyaywgbsOqbiBtw6F5IMOtdCDEkcSpYSBwaOG6o2kgY2jhuqF5IHRyw6puIFBDLjwvdGQ+PC90cj4KPHRyPjx0ZD5E4buxbmcgbOG6oWkgYuG6sW5nIG3hu5l0IGzhu4duaDwvdGQ+PHRkIGNsYXNzPSJvayI+xJDhuqF0PC90ZD48dGQgY2xhc3M9Im1pZCI+TeG7mXQgcGjhuqduIChHNCk8L3RkPjx0ZD5CxINuZyBW4bqtbiBow6BuaDwvdGQ+PC90cj4KPHRyPjx0ZD7EkOG7pyBn4buNbiBjaG8gxJHhu5Mgw6FuIDQgdHXhuqduPC90ZD48dGQgY2xhc3M9Im1pZCI+TeG7mXQgcGjhuqduPC90ZD48dGQgY2xhc3M9Im9rIj7EkOG6oXQ8L3RkPjx0ZD5UaMOqbSBixrDhu5tjIGJ1aWxkIHdoZWVsLCBs4bubcCA8Y29kZT5qb2JzLzwvY29kZT4gdsOgIGjDoG0gY2h1eeG7g24gc2NoZW1hLiA8Y29kZT5hZHIvPC9jb2RlPiwgPGNvZGU+cnVuYm9vay5tZDwvY29kZT4sIENJIMSR4buDIG3hu6ljIHThu5FpIHRoaeG7g3UuPC90ZD48L3RyPgo8L3RhYmxlPgoiIiIpCnBhZ2Uuc2VjdGlvbigiIiI1LiBMw6F0IMSR4bqndSB0acOqbiIiIiwgTm9uZSwgIiIiCjxwPlBoYXNlIDAgxJHhuql5IGzDqm4gPGNvZGU+ZGV2ZWxvcDwvY29kZT46IDxjb2RlPnB5cHJvamVjdC50b21sPC9jb2RlPiBjw7MgNCBuaMOzbSB0aMawIHZp4buHbiwgPGNvZGU+c3JjL3N0b2NrbGFrZS9jb250cmFjdHM8L2NvZGU+LCA8Y29kZT5jb21tb248L2NvZGU+IHbDoCBraHVuZyA8Y29kZT5zb3VyY2VzPC9jb2RlPiwgPGNvZGU+ZG9ja2VyLzwvY29kZT4sIDxjb2RlPmNvbmYvPC9jb2RlPiwgPGNvZGU+ZG9ja2VyLWNvbXBvc2UueW1sPC9jb2RlPiwgPGNvZGU+TWFrZWZpbGU8L2NvZGU+LCB0ZXN0IGNobyBzY2hlbWEuIFhvbmcga2hpIHRlc3Qga2jDtG5nIGPhuqduIFNwYXJrIGNo4bqheSDEkcaw4bujYyDhu58gbeG7jWkgbcOheSwgPGNvZGU+bWFrZSB0ZXN0PC9jb2RlPiB2w6AgPGNvZGU+bWFrZSB1cDwvY29kZT4gY2jhuqF5IMSRxrDhu6NjIHRyw6puIFBDLCB2w6AgPGNvZGU+aW1wb3J0IHN0b2NrbGFrZS5jb250cmFjdHM8L2NvZGU+IGNo4bqheSDEkcaw4bujYyB0cm9uZyBpbWFnZSBjb2xsZWN0b3IsIGRhc2hib2FyZC48L3A+CjxwIGNsYXNzPSJzdWIiPlRoYW0ga2jhuqNvOiA8YSBocmVmPSJodHRwczovL3BhY2thZ2luZy5weXRob24ub3JnL2Rpc2N1c3Npb25zL3NyYy1sYXlvdXQtdnMtZmxhdC1sYXlvdXQvIj5zcmMgbGF5b3V0IChQeVBBKTwvYT4gwrcgPGEgaHJlZj0iaHR0cHM6Ly9naXRodWIuY29tL2FsZXhpb2FubmlkZXMvcHlzcGFyay1leGFtcGxlLXByb2plY3QiPnB5c3BhcmstZXhhbXBsZS1wcm9qZWN0PC9hPiDCtyA8YSBocmVmPSJodHRwczovL21lZGl1bS5jb20vZGV2ZWxvcGVyemVuL2Jlc3QtcHJhY3RpY2VzLXdyaXRpbmctcHJvZHVjdGlvbi1ncmFkZS1weXNwYXJrLWpvYnMtY2I2ODhhYzRkMjBmIj5wcm9kdWN0aW9uLWdyYWRlIFB5U3Bhcmsgam9iczwvYT4gwrcgPGEgaHJlZj0iaHR0cHM6Ly9jb29raWVjdXR0ZXItZGF0YS1zY2llbmNlLmRyaXZlbmRhdGEub3JnL29waW5pb25zLyI+Q29va2llY3V0dGVyIERhdGEgU2NpZW5jZTwvYT4uPC9wPgoiIiIpCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgcGFnZS53cml0ZShzeXMuYXJndlsxXSwgc291cmNlPV9fZmlsZV9fKQo= -->
