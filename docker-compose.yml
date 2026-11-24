@@ -1,0 +1,367 @@
+# stocklake — Kafka (KRaft) + HDFS (1 NN + 3 DN) + Spark 3.5 standalone + collector + Streamlit.
+# Resources: Planning table 2.2 (23.5GB / 13 vCPU). Ports/volumes: Planning table 2.3.
+# Workers via profiles: w1 = worker1, w2 = workers 1-2, w3 = workers 1-3.
+#   make up            (= W=3)      make up W=1
+# container_name = service name, so `docker exec namenode ...` works as in the plan.
+# restart: "no" everywhere: the benchmarks kill containers on purpose.
+# Host ports never use 8000 / 9443 (portainer on the PC).
+
+name: ${COMPOSE_PROJECT_NAME:-stocklake}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Settings read by stocklake.common.config.
+x-app-env: &app-env
+  KAFKA_BOOTSTRAP: kafka:9092
+  HDFS_URI: hdfs://namenode:8020
+  WEBHDFS_HOST: namenode
+  WEBHDFS_PORT: "9870"
+  SPARK_MASTER: spark://spark-master:7077
+  APP_CONF_DIR: /opt/stocklake/conf/app
+  HDFS_USER: ${HDFS_USER:-stocklake}
+
+# Dev mounts: executors must see the same code as the driver, so ALL Spark containers mount
+# these. PYTHONPATH=/opt/stocklake/src (set in the image) makes ./src win over the wheel.
+x-dev-mounts: &dev-mounts
+  - ./src:/opt/stocklake/src:ro
+  - ./jobs:/opt/stocklake/jobs:ro
+  - ./conf/app:/opt/stocklake/conf/app:ro
+
+# HDFS config: conf/hadoop/*.xml are bind-mounted read-only over the image defaults in
+# /opt/hadoop/etc/hadoop (HADOOP_CONF_DIR). Do not add CORE-SITE.XML_* / HDFS-SITE.XML_* env
+# vars: the image's envtoconf.py would try to rewrite the read-only files.
+
+# One Spark image for master, workers and driver. The same build block is repeated on each
+# service through this anchor so `up` never tries to pull stocklake/spark:dev from a registry;
+# the build is cached, so it effectively runs once.
+x-spark-common: &spark-common
+  image: stocklake/spark:dev
+  build:
+    context: .
+    dockerfile: docker/spark/Dockerfile
+    args:
+      SPARK_IMAGE_BASE: ${SPARK_IMAGE_BASE:-apache/spark:3.5.9-scala2.12-java17-python3-ubuntu}
+  restart: "no"
+  init: true
+  logging: *logging
+  networks: [stocklake]
+
+x-spark-worker: &spark-worker
+  <<: *spark-common
+  mem_limit: ${SPARK_WORKER_MEM_LIMIT:-4g}
+  cpus: ${SPARK_WORKER_CPUS:-2}
+  command:
+    - /opt/spark/bin/spark-class
+    - org.apache.spark.deploy.worker.Worker
+    - --webui-port
+    - "8081"
+    - spark://spark-master:7077
+  volumes: *dev-mounts
+  depends_on:
+    spark-master:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:8081/json/ > /dev/null"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 30s
+
+x-datanode: &datanode
+  image: ${HADOOP_IMAGE:-apache/hadoop:3.3.6}
+  restart: "no"
+  logging: *logging
+  networks: [stocklake]
+  mem_limit: ${DATANODE_MEM_LIMIT:-1g}
+  cpus: ${DATANODE_CPUS:-0.5}
+  command: ["hdfs", "datanode"]
+  depends_on:
+    namenode:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS 'http://localhost:9864/jmx?qry=Hadoop:service=DataNode,name=DataNodeInfo' > /dev/null"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 30s
+
+services:
+  # ---------------------------------------------------------------- Kafka (KRaft)
+  kafka:
+    image: ${KAFKA_IMAGE:-apache/kafka:3.9.2}
+    container_name: kafka
+    hostname: kafka
+    restart: "no"
+    logging: *logging
+    networks: [stocklake]
+    mem_limit: ${KAFKA_MEM_LIMIT:-2g}
+    cpus: ${KAFKA_CPUS:-2}
+    env_file: [conf/kafka/kraft.env]
+    environment:
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms1g -Xmx1g}
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:${KAFKA_EXTERNAL_PORT:-9094}
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${KAFKA_EXTERNAL_PORT:-9094}:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+      - ./conf/kafka:/opt/stocklake/conf/kafka:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # ---------------------------------------------------------------- HDFS
+  namenode:
+    image: ${HADOOP_IMAGE:-apache/hadoop:3.3.6}
+    container_name: namenode
+    hostname: namenode
+    restart: "no"
+    logging: *logging
+    networks: [stocklake]
+    mem_limit: ${NAMENODE_MEM_LIMIT:-1536m}
+    cpus: ${NAMENODE_CPUS:-1}
+    environment:
+      HDFS_NAMENODE_OPTS: ${HDFS_NAMENODE_OPTS:--Xmx1g}
+      NAMENODE_DIR: /data/namenode
+      HDFS_CLUSTER_ID: stocklake
+    # Formats only when /data/namenode is empty, then execs `hdfs namenode`.
+    command: ["bash", "/opt/stocklake/conf/hadoop/start-namenode.sh"]
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${NAMENODE_HTTP_PORT:-9870}:9870"
+      - "${HOST_BIND:-127.0.0.1}:${NAMENODE_RPC_PORT:-8020}:8020"
+    volumes:
+      - nn_data:/data
+      - ./conf/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./conf/hadoop:/opt/stocklake/conf/hadoop:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS 'http://localhost:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus' | grep -q active"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  datanode1:
+    <<: *datanode
+    container_name: datanode1
+    hostname: datanode1
+    environment:
+      HDFS_DATANODE_OPTS: ${HDFS_DATANODE_OPTS:--Xmx512m}
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${DATANODE1_HTTP_PORT:-9864}:9864"
+    volumes:
+      - dn1_data:/data
+      - ./conf/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+
+  datanode2:
+    <<: *datanode
+    container_name: datanode2
+    hostname: datanode2
+    environment:
+      HDFS_DATANODE_OPTS: ${HDFS_DATANODE_OPTS:--Xmx512m}
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${DATANODE2_HTTP_PORT:-9865}:9864"
+    volumes:
+      - dn2_data:/data
+      - ./conf/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+
+  datanode3:
+    <<: *datanode
+    container_name: datanode3
+    hostname: datanode3
+    environment:
+      HDFS_DATANODE_OPTS: ${HDFS_DATANODE_OPTS:--Xmx512m}
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${DATANODE3_HTTP_PORT:-9866}:9864"
+    volumes:
+      - dn3_data:/data
+      - ./conf/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+
+  # ---------------------------------------------------------------- Spark standalone
+  spark-master:
+    <<: *spark-common
+    container_name: spark-master
+    hostname: spark-master
+    mem_limit: ${SPARK_MASTER_MEM_LIMIT:-1g}
+    cpus: ${SPARK_MASTER_CPUS:-0.5}
+    environment:
+      SPARK_DAEMON_MEMORY: 512m
+      SPARK_LOCAL_HOSTNAME: spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${SPARK_MASTER_UI_PORT:-8080}:8080"
+      - "${HOST_BIND:-127.0.0.1}:${SPARK_MASTER_PORT:-7077}:7077"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/json/ | grep -q ALIVE"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  spark-worker1:
+    <<: *spark-worker
+    container_name: spark-worker1
+    hostname: spark-worker1
+    profiles: [w1, w2, w3]
+    environment:
+      <<: *app-env
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-3g}
+      SPARK_DAEMON_MEMORY: 512m
+      SPARK_LOCAL_HOSTNAME: spark-worker1
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${SPARK_WORKER1_UI_PORT:-8081}:8081"
+
+  spark-worker2:
+    <<: *spark-worker
+    container_name: spark-worker2
+    hostname: spark-worker2
+    profiles: [w2, w3]
+    environment:
+      <<: *app-env
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-3g}
+      SPARK_DAEMON_MEMORY: 512m
+      SPARK_LOCAL_HOSTNAME: spark-worker2
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${SPARK_WORKER2_UI_PORT:-8082}:8081"
+
+  spark-worker3:
+    <<: *spark-worker
+    container_name: spark-worker3
+    hostname: spark-worker3
+    profiles: [w3]
+    environment:
+      <<: *app-env
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-3g}
+      SPARK_DAEMON_MEMORY: 512m
+      SPARK_LOCAL_HOSTNAME: spark-worker3
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${SPARK_WORKER3_UI_PORT:-8083}:8081"
+
+  # Long-lived client container: docker compose exec spark-driver spark-submit ...
+  spark-driver:
+    <<: *spark-common
+    container_name: spark-driver
+    hostname: spark-driver
+    mem_limit: ${SPARK_DRIVER_MEM_LIMIT:-2g}
+    cpus: ${SPARK_DRIVER_CPUS:-1}
+    environment:
+      <<: *app-env
+      SPARK_LOCAL_HOSTNAME: spark-driver
+    command: ["sleep", "infinity"]
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${SPARK_DRIVER_UI_PORT:-4040}:4040"
+    volumes: *dev-mounts
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import pyspark, stocklake"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------- Python apps
+  collector:
+    image: stocklake/collector:dev
+    build:
+      context: .
+      dockerfile: docker/collector/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    container_name: collector
+    hostname: collector
+    restart: "no"
+    init: true
+    logging: *logging
+    networks: [stocklake]
+    mem_limit: ${COLLECTOR_MEM_LIMIT:-1g}
+    cpus: ${COLLECTOR_CPUS:-0.5}
+    environment:
+      <<: *app-env
+      COLLECTOR_STATE_DIR: /opt/stocklake/state
+    volumes:
+      - collector_state:/opt/stocklake/state
+      - ./src:/opt/stocklake/src:ro
+      - ./jobs:/opt/stocklake/jobs:ro
+      - ./conf/app:/opt/stocklake/conf/app:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import stocklake.contracts"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    image: stocklake/dashboard:dev
+    build:
+      context: .
+      dockerfile: docker/dashboard/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    container_name: dashboard
+    hostname: dashboard
+    restart: "no"
+    init: true
+    logging: *logging
+    networks: [stocklake]
+    mem_limit: ${DASHBOARD_MEM_LIMIT:-1g}
+    cpus: ${DASHBOARD_CPUS:-0.5}
+    environment:
+      <<: *app-env
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"
+    volumes:
+      - ./src:/opt/stocklake/src:ro
+      - ./dashboard:/opt/stocklake/dashboard:ro
+      - ./conf/app:/opt/stocklake/conf/app:ro
+    depends_on:
+      namenode:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+networks:
+  stocklake:
+    name: stocklake
+
+volumes:
+  kafka_data:
+  nn_data:
+  dn1_data:
+  dn2_data:
+  dn3_data:
+  collector_state:
