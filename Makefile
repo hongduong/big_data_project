@@ -7,7 +7,8 @@ SHELL := /bin/bash
 
 COMPOSE     ?= docker compose
 PROJECT     ?= $(or $(COMPOSE_PROJECT_NAME),stocklake)
-PYTHON      ?= python3
+# Host Python for lint/docs: the repo .venv when present (Mac), else python3 (PC).
+PYTHON      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 SPARK_IMAGE ?= stocklake/spark:dev
 W           ?= 3
 PYTEST_ARGS ?=
@@ -31,7 +32,7 @@ help:
 	@echo "  build              build stocklake/spark, collector, dashboard images"
 	@echo "  up [W=1|2|3]       start the stack with W Spark workers (default 3)"
 	@echo "  down               stop and remove containers (volumes are kept)"
-	@echo "  health [W=n]       container state/health, live DataNodes, ALIVE Spark workers"
+	@echo "  health [W=n]       container state/health, live DataNodes, HDFS safe mode, ALIVE Spark workers"
 	@echo "  topics             create Kafka topics (idempotent)"
 	@echo "  smoke-kafka        produce + consume one message on topic smoke_test"
 	@echo "  smoke-spark        SparkPi + check executors ran on every registered worker"
@@ -46,7 +47,8 @@ build:
 
 up:
 	@case "$(W)" in 1|2|3) ;; *) echo "W must be 1, 2 or 3 (got '$(W)')"; exit 2;; esac
-	$(COMPOSE) --profile w$(W) up -d
+	@# --wait: return only once every started container is healthy, so `make up && make health` works.
+	$(COMPOSE) --profile w$(W) up -d --wait --wait-timeout 300
 	@# Scaling down: remove workers above W so health/benchmarks see exactly W workers.
 	@for i in 1 2 3; do \
 	  if [ $$i -gt $(W) ] && docker ps -a -q --filter "name=^spark-worker$$i$$" | grep -q .; then \
@@ -54,6 +56,10 @@ up:
 	    $(COMPOSE) --profile w3 rm --stop --force spark-worker$$i; \
 	  fi; \
 	done
+	@# After a restart the NameNode stays in safe mode (read-only) until enough block reports
+	@# arrive + 30 s extension; wait so jobs started right after `make up` can write.
+	@echo "waiting for HDFS to leave safe mode"; \
+	timeout 180 docker exec namenode hdfs dfsadmin -safemode wait 2>/dev/null
 
 # Never removes volumes. --profile w3 so every worker container is included.
 down:
@@ -77,9 +83,12 @@ health:
 	live="$$(docker exec namenode hdfs dfsadmin -report -live 2>/dev/null | sed -n 's/^Live datanodes (\([0-9]*\)).*/\1/p' || true)"; \
 	echo "HDFS live DataNodes : $${live:-?} (expected 3)"; \
 	[ "$${live:-0}" -ge 3 ] || fail=1; \
+	sm="$$(docker exec namenode hdfs dfsadmin -safemode get 2>/dev/null || echo 'Safe mode is ?')"; \
+	echo "HDFS safe mode      : $${sm##* } (expected OFF)"; \
+	[ "$${sm##* }" = OFF ] || fail=1; \
 	sw="$$(docker exec spark-master python3 -c 'import json, urllib.request as u; d = json.load(u.urlopen("http://localhost:8080/json/", timeout=5)); a = sorted(w["host"] for w in d["workers"] if w["state"] == "ALIVE"); print(len(a), *a)' 2>/dev/null || echo 0)"; \
 	echo "Spark ALIVE workers : $$sw (expected $$n_exp)"; \
-	[ "$${sw%% *}" -ge "$$n_exp" ] || fail=1; \
+	[ "$${sw%% *}" -eq "$$n_exp" ] || fail=1; \
 	if [ $$fail -ne 0 ]; then echo "HEALTH: FAIL"; exit 1; fi; \
 	echo "HEALTH: OK"
 
@@ -167,8 +176,13 @@ test:
 lint:
 	@if command -v ruff >/dev/null 2>&1; then ruff check .; else $(PYTHON) -m ruff check .; fi
 
+# Runs on the host (Mac .venv or PC python3): stocklake.contracts is stdlib-only, so it needs
+# only ./src. Calls to_markdown() directly instead of `-m stocklake.contracts.convert`, which runpy
+# would execute a second time (contracts/__init__ already imports it -> RuntimeWarning).
 docs:
-	PYTHONPATH=src $(PYTHON) -m stocklake.contracts.convert > docs/data_dictionary.md.tmp
+	PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -c \
+	  'from stocklake.contracts.convert import to_markdown; print(to_markdown())' \
+	  > docs/data_dictionary.md.tmp
 	mv docs/data_dictionary.md.tmp docs/data_dictionary.md
 
 stats:
