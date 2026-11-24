@@ -1,1 +1,1 @@
-"""Các collector batch: nến ngày (đã cài), khối ngoại, hồ sơ doanh nghiệp, vĩ mô (chưa)."""
+"""Các collector batch: nến ngày, nến phút lịch sử (đã cài), khối ngoại, hồ sơ, vĩ mô (chưa)."""
