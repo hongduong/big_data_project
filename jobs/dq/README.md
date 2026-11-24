@@ -21,7 +21,9 @@ khi nhả. Ghi `dq_report` làm sau, ngoài khoá. Job clean xin khoá ghi cùng
   (bên ghi đang đợi thì bên đọc mới cũng đợi, tránh bỏ đói bên ghi);
 - chờ tối đa 900 giây (mặc định `wait_timeout_s`); quá hạn thì job in lỗi `LockTimeout` ra stderr
   và thoát mã khác 0, không ghi gì;
-- khoá tự hết hạn sau 3600 giây nếu tiến trình chết giữa chừng;
+- khoá đọc có hạn 600 giây, được luồng nền gia hạn mỗi 200 giây trong lúc DQ còn chạy; tiến trình
+  chết giữa chừng thì khoá hết hạn sau tối đa 600 giây kể từ lần gia hạn cuối (file khoá hết hạn
+  do job clean xoá khi xin khoá ghi);
 - JSON có `lock_waited_s` (tổng giây đã chờ cả hai khoá).
 - DQ chạy một job Spark rỗng để chắc đã có executor RỒI mới xin khoá đọc: job clean không đặt
   `spark.cores.max` nên có thể giữ hết core trong lúc chờ khoá ghi; nếu DQ giữ khoá đọc mà chưa có
