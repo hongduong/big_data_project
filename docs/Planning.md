@@ -442,7 +442,7 @@ Batch collector ghi `raw` theo từng lô, đặt tên file theo (`source`, `sym
 | `foreign_flow` | `symbol`, `trade_date` | như raw, đã chuẩn hoá kiểu | `year` |
 | `company_profile` | `symbol` | bản mới nhất | không |
 | `macro_daily` | `series_id`, `obs_date` | `value`, `available_at` | không |
-| `intraday_1m` | `symbol`, `bar_ts` | OHLCV, `trade_date`, `available_at`. Hợp của `raw/intraday_history` và `raw/intraday_prices`; khi trùng khoá chọn theo ưu tiên: history (vci) > streaming từ nguồn thật > replay có run id; dòng replay không có run id bị loại | `year`, `month` (sắp xếp theo `symbol`) |
+| `intraday_1m` | `symbol`, `bar_ts` | OHLCV, `source` (nguồn của dòng được chọn), `trade_date`, `available_at`. Hợp của `raw/intraday_history` và `raw/intraday_prices`; khi trùng khoá chọn theo ưu tiên: history (vci) > streaming từ nguồn thật > replay có run id; dòng replay không có run id bị loại | `year`, `month` (sắp xếp theo `symbol`) |
 | `market_news` | `news_id` | như raw, đã khử trùng | `year`, `month` |
 | `trading_calendar` | `trade_date` | `is_trading_day` (suy ra từ VNINDEX) | không |
 

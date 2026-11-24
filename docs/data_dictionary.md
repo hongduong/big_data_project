@@ -281,6 +281,7 @@ Nến 1 phút đã khử trùng; sắp xếp theo symbol
 | `low` | double | không |  |
 | `close` | double | không |  |
 | `volume` | long | không |  |
+| `source` | string | không | Nguồn của dòng được chọn (history: nguồn của file, vd vci; streaming: tên nguồn thật; replay có run id: replay) |
 | `trade_date` | date | không |  |
 | `available_at` | timestamp | không |  |
 
