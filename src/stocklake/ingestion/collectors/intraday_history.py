@@ -3,6 +3,11 @@
 Bố cục file (CỐ ĐỊNH, job khác dựa vào):
     <table_path('raw','intraday_history')>/source=vci/year=<YYYY>/<SYMBOL>.parquet
 Mỗi (mã, năm giờ VN) một file, ghi đè nguyên tử khi chạy lại; file KHÔNG chứa cột phân vùng.
+File có MỘT ROW GROUP MỖI THÁNG giờ VN của bar_ts (dòng sắp tăng theo bar_ts) để người đọc
+(replay, Spark) lọc theo thống kê min/max của bar_ts. Năm hiện tại được lấy lại mỗi lượt nhưng
+file chỉ được ghi lại khi nến đổi (hoặc file chưa chia row group theo tháng); không đổi thì giữ
+nguyên file để thời gian sửa trên HDFS không đổi. `regroup_history_files` chia lại file CŨ trên
+HDFS mà không gọi VCI.
 
 Thiết kế: runner riêng, KHÔNG kế thừa `BaseCollector`. Vòng lặp của nó là "một WorkUnit ->
 lấy từ danh sách nguồn -> ghi", còn ở đây VCI phân trang lùi theo MÃ (6-7 request/mã) nhưng ghi
@@ -20,6 +25,8 @@ lại `StateStore`/`JsonFileStateStore` và cách đặt khoá `intraday_history
 from __future__ import annotations
 
 import os
+import re
+import time as _time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -48,20 +55,48 @@ BAR_SECONDS = 60
 TRADING_SESSIONS = ((time(9, 0), time(11, 30)), (time(13, 0), time(15, 0)))
 
 
+COMPARE_COLUMNS = ("bar_ts", "open", "high", "low", "close", "volume")  # cột so sánh khi ghi lại
+
+
 class ParquetWriter(Protocol):
-    def write(self, table: Any, path: str) -> None: ...
+    def write_groups(self, groups: list[Any], path: str) -> None:
+        """Ghi một file, mỗi phần tử của `groups` đúng một row group (theo thứ tự)."""
+        ...
+
+
+class HistoryReader(Protocol):
+    def read_existing(self, path: str, min_row_groups: int) -> list[dict[str, Any]] | None:
+        """Các dòng (cột COMPARE_COLUMNS) của file hiện có; None nếu chưa có hoặc có ít hơn
+        `min_row_groups` row group (= cần ghi lại)."""
+        ...
 
 
 class HdfsParquetWriter:
-    """Ghi qua `common.hdfs.write_parquet_atomic` (import muộn)."""
+    """Ghi qua `common.hdfs.write_parquet_row_groups_atomic` (import muộn)."""
 
     def __init__(self, fs: Any = None):
         self.fs = fs
 
-    def write(self, table: Any, path: str) -> None:
-        from stocklake.common.hdfs import write_parquet_atomic
+    def write_groups(self, groups: list[Any], path: str) -> None:
+        from stocklake.common.hdfs import write_parquet_row_groups_atomic
 
-        write_parquet_atomic(table, path, fs=self.fs)
+        write_parquet_row_groups_atomic(groups, path, fs=self.fs)
+
+
+class HdfsHistoryReader:
+    """Đọc file hiện có để so với nến mới (import muộn)."""
+
+    def __init__(self, fs: Any = None):
+        self.fs = fs
+
+    def read_existing(self, path: str, min_row_groups: int) -> list[dict[str, Any]] | None:
+        from stocklake.common.hdfs import parquet_file_info, read_parquet_files
+
+        info = parquet_file_info(path, fs=self.fs)
+        if info is None or info["num_row_groups"] < min_row_groups:
+            return None
+        t = read_parquet_files([path], columns=list(COMPARE_COLUMNS), fs=self.fs)
+        return t.to_pylist() if t.num_rows else []
 
 
 # ----------------------------------------------------------------- hàm thuần
@@ -93,6 +128,47 @@ def state_key(symbol: str, year: int, live: bool = False) -> str:
 
 def vn_year(ts: datetime) -> int:
     return ts.astimezone(VN_TZ).year
+
+
+def vn_month(ts: datetime) -> tuple[int, int]:
+    """(năm, tháng) của ts theo giờ VN."""
+    local = ts.astimezone(VN_TZ)
+    return local.year, local.month
+
+
+def month_runs(keys: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Các đoạn liên tiếp cùng khoá tháng: [(vị trí đầu, độ dài)]; `keys` đã sắp theo thời gian."""
+    runs: list[tuple[int, int]] = []
+    for i, k in enumerate(keys):
+        if i and k == keys[i - 1]:
+            runs[-1] = (runs[-1][0], runs[-1][1] + 1)
+        else:
+            runs.append((i, 1))
+    return runs
+
+
+def group_rows_by_month(rows: Sequence[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Sắp dòng theo bar_ts rồi chia theo tháng giờ VN: mỗi tháng một nhóm, theo thứ tự tháng."""
+    ordered = sorted(rows, key=lambda r: r["bar_ts"])
+    runs = month_runs([vn_month(r["bar_ts"]) for r in ordered])
+    return [ordered[o : o + n] for o, n in runs]
+
+
+def _utc(ts: datetime) -> datetime:
+    return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
+
+def _compare_key(r: Mapping[str, Any]) -> tuple:
+    return (_utc(r["bar_ts"]),) + tuple(r[c] for c in COMPARE_COLUMNS[1:])
+
+
+def bars_identical(
+    existing: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]]
+) -> bool:
+    """Cùng số dòng và cùng (bar_ts, open, high, low, close, volume); bỏ qua cột ingest_*."""
+    if len(existing) != len(rows):
+        return False
+    return sorted(map(_compare_key, existing)) == sorted(map(_compare_key, rows))
 
 
 def new_run_id(now: datetime) -> str:
@@ -191,6 +267,7 @@ class _Stats:
     failed: list[str]
     skipped: list[str]
     files: int = 0
+    unchanged: int = 0
     rows: int = 0
     requests: int = 0
     dups: int = 0
@@ -213,6 +290,7 @@ class IntradayHistoryCollector:
         clock: Callable[[], datetime] | None = None,
         to_table: Callable[[list[dict[str, Any]]], Any] | None = None,
         base: str | None = None,
+        reader: HistoryReader | None = None,
     ):
         self.client = client
         self.state = state
@@ -224,6 +302,7 @@ class IntradayHistoryCollector:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.to_table = to_table or (lambda rows: rows_to_table(rows))
         self.base = base
+        self.reader = reader or HdfsHistoryReader()
         self.per_year_rows: dict[str, int] = defaultdict(int)
 
     def plan(self, symbol: str, now: datetime) -> list[WorkUnit]:
@@ -256,14 +335,30 @@ class IntradayHistoryCollector:
             n = len(ybars)
             if ybars:
                 rows = build_rows(ybars, now, run_id)
-                self.writer.write(self.to_table(rows), file_path(symbol, year, self.base))
-                st.files += 1
-                st.rows += n
-                self.per_year_rows[str(year)] += n
+                groups = group_rows_by_month(rows)
+                path = file_path(symbol, year, self.base)
+                if self._unchanged(path, rows, len(groups)):
+                    st.unchanged += 1
+                else:
+                    self.writer.write_groups([self.to_table(g) for g in groups], path)
+                    st.files += 1
+                    st.rows += n
+                    self.per_year_rows[str(year)] += n
             elif u.params["live"]:
                 log.warning("%s: %s rỗng cho năm hiện tại", NAME, symbol)
             # năm trước ngày lịch sử bắt đầu: xong, 0 dòng, không ghi file rỗng
             self.state.mark_done(NAME, u.key, {"source": SOURCE, "records": n})
+
+    def _unchanged(self, path: str, rows: list[dict[str, Any]], n_months: int) -> bool:
+        """File đã có, đã chia row group theo tháng và nến y hệt -> khỏi ghi lại."""
+        try:
+            existing = self.reader.read_existing(path, n_months)
+        except Exception as exc:  # noqa: BLE001 - không đọc được thì cứ ghi lại
+            log.warning(
+                "%s: không đọc được %s (%s: %s), sẽ ghi lại", NAME, path, type(exc).__name__, exc
+            )
+            return False
+        return existing is not None and bars_identical(existing, rows)
 
     def _record_blocked(self, symbol: str, exc: SourceBlockedError, now: datetime) -> dict:
         info = {
@@ -327,6 +422,7 @@ class IntradayHistoryCollector:
             "symbols_failed": st.failed,
             "symbols_skipped": st.skipped,
             "files_written": st.files,
+            "files_unchanged": st.unchanged,
             "rows_written": st.rows,
             "requests": st.requests,
             "duplicates_dropped": st.dups,
@@ -358,6 +454,7 @@ def run_intraday_history(
     clock: Callable[[], datetime] | None = None,
     to_table: Callable[[list[dict[str, Any]]], Any] | None = None,
     base: str | None = None,
+    reader: HistoryReader | None = None,
 ) -> dict[str, Any]:
     """Chạy collector với cấu hình mặc định; tham số keyword chỉ dùng để thay trong test.
 
@@ -388,7 +485,214 @@ def run_intraday_history(
         clock,
         to_table,
         base,
+        reader,
     )
     out = col.run()
     log.info("%s: %s", NAME, {k: v for k, v in out.items() if not k.startswith("symbols_")})
+    return out
+
+
+# ----------------------------------------------------------------- chia lại file cũ trên HDFS
+
+_FILE_RE = re.compile(r"/year=(\d{4})/([^/]+)\.parquet$")
+MAX_LISTED = 200  # số file tối đa liệt kê chi tiết trong summary
+
+
+def _rm_quiet(fs: Any, path: str) -> None:
+    try:
+        if fs.exists(path):
+            fs.rm(path)
+    except Exception as exc:  # noqa: BLE001 - dọn rác không được che lỗi gốc
+        log.warning("%s: không xoá được %s: %s", NAME, path, exc)
+
+
+def _discover(fs: Any, root: str, symbols: set[str] | None, years: set[int] | None):
+    """Liệt kê (mã, năm, đường dẫn) các file <root>/year=YYYY/<SYM>.parquet; bỏ file tạm."""
+    try:
+        found = sorted(fs.find(root))
+    except FileNotFoundError:
+        return []
+    out = []
+    for p in found:
+        m = _FILE_RE.search(p)
+        if not m:  # file tạm `.regroup-*`, `.tmp-*` không khớp (không kết thúc .parquet)
+            continue
+        year, sym = int(m.group(1)), m.group(2)
+        if (symbols and sym not in symbols) or (years and year not in years):
+            continue
+        out.append((sym, year, p))
+    return out
+
+
+def _verify(fs: Any, tmp: str, original: Any, expected_groups: list[int]):
+    """Kiểm file tạm với bản gốc (đã sắp theo bar_ts). Trả (lý do lỗi | None, parquet_file_info)."""
+    import pyarrow.compute as pc
+
+    from stocklake.common.hdfs import parquet_file_info, read_parquet_files
+
+    info = parquet_file_info(tmp, fs=fs)
+    if info is None:
+        return "file tạm không tồn tại sau khi ghi", None
+    if info["num_rows"] != original.num_rows:
+        return f"số dòng {info['num_rows']} != {original.num_rows}", info
+    if list(info["row_group_rows"]) != expected_groups:
+        return f"row group {info['row_group_rows']} != theo tháng {expected_groups}", info
+    back = read_parquet_files([tmp], fs=fs)
+    if not back.schema.equals(original.schema, check_metadata=False):
+        return "schema khác bản gốc", info
+    if back.num_rows != original.num_rows:
+        return "số dòng đọc lại khác bản gốc", info
+    if pc.min_max(back["bar_ts"]).as_py() != pc.min_max(original["bar_ts"]).as_py():
+        return "min/max bar_ts khác bản gốc", info
+    if pc.sum(back["volume"]).as_py() != pc.sum(original["volume"]).as_py():
+        return "tổng volume khác bản gốc", info
+    if not back.equals(original):
+        return "nội dung khác bản gốc", info
+    return None, info
+
+
+def _replace(fs: Any, path: str, tmp: str, res: dict[str, Any], expect_rows: int, groups: int):
+    """Thay `path` bằng `tmp`: path -> bak, tmp -> path, xoá bak. Lỗi giữa chừng ghi vào `res`."""
+    from stocklake.common.hdfs import parquet_file_info
+
+    bak = f"{path}.regroup-bak-{uuid.uuid4().hex[:8]}"
+    try:
+        fs.mv(path, bak)
+    except Exception as exc:  # noqa: BLE001
+        res["reason"] = f"không đổi tên bản gốc sang bak: {exc}"
+    if not (fs.exists(bak) and not fs.exists(path)):
+        res.setdefault("reason", "đổi tên bản gốc sang bak không có hiệu lực")
+        _rm_quiet(fs, tmp)  # bản gốc còn nguyên
+        return
+    try:
+        fs.mv(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        res["reason"] = f"đổi tên tmp -> đích lỗi: {exc}"
+    info = parquet_file_info(path, fs=fs) if fs.exists(path) else None
+    if info is None or info["num_rows"] != expect_rows or info["num_row_groups"] != groups:
+        # hoàn tác: trả bản gốc về chỗ cũ, giữ tmp để điều tra
+        if info is None or not fs.exists(path):
+            try:
+                fs.mv(bak, path)
+                res.setdefault("reason", "tmp -> đích không có hiệu lực; đã khôi phục bản gốc")
+                return
+            except Exception as exc:  # noqa: BLE001
+                res["reason"] = f"{res.get('reason', '')} VÀ khôi phục lỗi: {exc}".strip()
+        res["critical"] = True
+        res["reason"] = (
+            f"NGHIÊM TRỌNG: {res.get('reason', 'đích sai sau đổi tên')}. "
+            f"Bản gốc giữ ở {bak}, bản mới giữ ở {tmp}; xử lý tay"
+        )
+        return
+    _rm_quiet(fs, bak)
+    if fs.exists(bak):
+        res["leftover"] = bak  # đã thay xong, chỉ còn bak chưa xoá được
+
+
+def _regroup_one(fs: Any, path: str, dry_run: bool) -> dict[str, Any]:
+    from stocklake.common.hdfs import (
+        parquet_file_info,
+        read_parquet_files,
+        write_parquet_row_groups_atomic,
+    )
+
+    res: dict[str, Any] = {"path": path, "status": "failed", "rows": 0}
+    info = parquet_file_info(path, fs=fs)
+    if info is None:
+        res["reason"] = "file không tồn tại"
+        return res
+    res.update(
+        rows=info["num_rows"], row_groups_before=info["num_row_groups"],
+        row_groups_after=info["num_row_groups"], bytes_before=info["size_bytes"],
+        bytes_after=info["size_bytes"],
+    )  # fmt: skip
+    orig = read_parquet_files([path], fs=fs)
+    if orig.num_rows != info["num_rows"] or "bar_ts" not in orig.column_names:
+        res["reason"] = "đọc file không khớp metadata hoặc thiếu cột bar_ts"
+        return res
+    ordered = orig.sort_by("bar_ts")
+    runs = month_runs([vn_month(ts) for ts in ordered["bar_ts"].to_pylist()])
+    if info["num_row_groups"] >= len(runs):
+        res["status"] = "already_grouped"
+        return res
+    sizes = [n for _, n in runs]
+    tmp = f"{path}.regroup-{uuid.uuid4().hex[:8]}"  # không kết thúc .parquet: reader bỏ qua
+    try:
+        write_parquet_row_groups_atomic([ordered.slice(o, n) for o, n in runs], tmp, fs=fs)
+        reason, tinfo = _verify(fs, tmp, ordered, sizes)
+    except Exception as exc:  # noqa: BLE001
+        reason, tinfo = f"{type(exc).__name__}: {exc}", None
+    if reason:
+        _rm_quiet(fs, tmp)  # bản gốc không bị đụng tới
+        res["reason"] = f"kiểm tra thất bại: {reason}"
+        return res
+    res.update(row_groups_after=len(runs), bytes_after=tinfo["size_bytes"])
+    if dry_run:
+        _rm_quiet(fs, tmp)
+        res["status"] = "regrouped"
+        return res
+    _replace(fs, path, tmp, res, info["num_rows"], len(runs))
+    if res.get("reason"):  # thay thế lỗi (bản gốc còn hoặc đã khôi phục, trừ khi critical)
+        res["status"] = "failed"
+        if not res.get("critical"):  # bản gốc còn nguyên
+            res.update(row_groups_after=info["num_row_groups"], bytes_after=info["size_bytes"])
+        return res
+    res["status"] = "regrouped"
+    return res
+
+
+def regroup_history_files(
+    symbols: Sequence[str] | None = None,
+    years: Sequence[int] | None = None,
+    dry_run: bool = False,
+    fs: Any = None,
+    base: str | None = None,
+    source: str = SOURCE,
+    max_listed: int = MAX_LISTED,
+) -> dict[str, Any]:
+    """Chia lại file lịch sử CŨ trên HDFS thành một row group mỗi tháng VN (không gọi VCI).
+
+    Mỗi file: ghi bản chia lại ra file tạm `<tên>.parquet.regroup-<id>`, kiểm kỹ với bản gốc
+    (số dòng, row group, schema, min/max bar_ts, tổng volume, toàn bộ nội dung), rồi mới thay.
+    Kiểm lỗi -> chỉ xoá file tạm, bản gốc giữ nguyên. `dry_run` dừng sau bước kiểm.
+    """
+    t0 = _time.monotonic()
+    if fs is None:
+        from stocklake.common.hdfs import webhdfs_fs
+
+        fs = webhdfs_fs()
+    root = (table_path("raw", NAME) if base is None else table_path("raw", NAME, base)) + (
+        f"/source={source}"
+    )
+    syms = {s.strip().upper() for s in symbols} if symbols else None
+    files = _discover(fs, root, syms, set(years) if years else None)
+    out: dict[str, Any] = {
+        "dry_run": dry_run, "files_total": len(files), "already_grouped": 0, "regrouped": 0,
+        "failed": [], "critical": [], "rows_total_before": 0, "rows_total_after": 0,
+        "bytes_before": 0, "bytes_after": 0, "files": [],
+    }  # fmt: skip
+    for _, _, path in files:
+        try:
+            r = _regroup_one(fs, path, dry_run)
+        except Exception as exc:  # noqa: BLE001 - một file lỗi không dừng cả lượt
+            r = {"path": path, "status": "failed", "rows": 0,
+                 "reason": f"{type(exc).__name__}: {exc}"}  # fmt: skip
+        st = r["status"]
+        if st == "failed":
+            out["failed"].append({"path": path, "reason": r.get("reason")})
+            if r.get("critical"):
+                out["critical"].append({"path": path, "reason": r.get("reason")})
+                log.error("%s: %s", NAME, r["reason"])
+        else:
+            out["already_grouped" if st == "already_grouped" else "regrouped"] += 1
+        out["rows_total_before"] += r["rows"]
+        out["rows_total_after"] += r["rows"]  # chia lại không đổi số dòng; lỗi -> giữ bản gốc
+        out["bytes_before"] += r.get("bytes_before", 0)
+        out["bytes_after"] += r.get("bytes_after", 0)
+        if len(out["files"]) < max_listed:
+            keys = ("path", "status", "rows", "row_groups_before", "row_groups_after")
+            out["files"].append({k: r.get(k) for k in keys})
+    out["files_listed_truncated"] = len(files) > max_listed
+    out["seconds"] = round(_time.monotonic() - t0, 3)
+    log.info("%s: regroup %s", NAME, {k: v for k, v in out.items() if k != "files"})
     return out

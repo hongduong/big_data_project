@@ -10,14 +10,19 @@ from stocklake.common.http import SourceBlockedError
 from stocklake.ingestion.collectors import intraday_history as mod
 from stocklake.ingestion.collectors.intraday_history import (
     IntradayHistoryCollector,
+    bars_identical,
     build_rows,
     dedup_bars,
     file_columns,
     file_path,
+    group_rows_by_month,
     in_trading_hours,
     load_symbols,
+    month_runs,
+    regroup_history_files,
     run_intraday_history,
     split_by_year,
+    vn_month,
     years_needed,
 )
 from stocklake.ingestion.framework import JsonFileStateStore
@@ -61,14 +66,39 @@ class FakeClient:
 
 class FakeWriter:
     def __init__(self):
-        self.writes = []
+        self.writes = []  # (path, [nhóm dòng theo tháng])
 
-    def write(self, table, path):
-        self.writes.append((path, table))
+    def write_groups(self, groups, path):
+        self.writes.append((path, list(groups)))
 
     @property
     def by_path(self):
+        """path -> toàn bộ dòng (các nhóm nối lại)."""
+        return {p: [r for g in gs for r in g] for p, gs in self.writes}
+
+    @property
+    def groups_by_path(self):
         return dict(self.writes)
+
+
+class FakeReader:
+    """Giả HdfsHistoryReader: path -> (số row group, dòng đã có)."""
+
+    def __init__(self, store=None):
+        self.store = dict(store or {})
+        self.calls = []
+
+    def read_existing(self, path, min_row_groups):
+        self.calls.append((path, min_row_groups))
+        if path not in self.store:
+            return None
+        n_groups, rows = self.store[path]
+        return None if n_groups < min_row_groups else rows
+
+    @classmethod
+    def after(cls, writer, groups_override=None):
+        """Reader mô tả các file mà `writer` vừa ghi (giữ nguyên số row group)."""
+        return cls({p: (len(gs), [r for g in gs for r in g]) for p, gs in writer.writes})
 
 
 def mins(sym, first, n):
@@ -78,6 +108,7 @@ def mins(sym, first, n):
 def make(tmp_path, client, symbols=("FPT",), since=date(2025, 1, 1), clock=lambda: NOW, **kw):
     state = JsonFileStateStore(tmp_path / "s.json")
     w = FakeWriter()
+    kw.setdefault("reader", FakeReader())
     col = IntradayHistoryCollector(
         client, state, w, symbols, since, clock=clock, to_table=IDENT, **kw
     )
@@ -204,6 +235,143 @@ def test_dedup_bars_keeps_first_sorted():
     assert n == 1 and [x.bar_ts for x in out] == [a.bar_ts, b.bar_ts] and out[0].close == 1.0
 
 
+# ------------------------------------------------------------- row group theo tháng
+
+
+def utc(*a):
+    return datetime(*a, tzinfo=UTC)
+
+
+def test_vn_month_boundaries():
+    assert vn_month(utc(2025, 10, 31, 16, 59)) == (2025, 10)
+    assert vn_month(utc(2025, 10, 31, 17, 0)) == (2025, 11)  # 00:00 01/11 giờ VN
+    assert vn_month(utc(2025, 12, 31, 17, 0)) == (2026, 1)  # qua năm mới
+
+
+def test_month_runs():
+    assert month_runs([]) == []
+    assert month_runs([(1, 1), (1, 1), (1, 2), (1, 2), (1, 2)]) == [(0, 2), (2, 3)]
+
+
+def test_group_rows_by_month_sorted_around_boundaries():
+    ts = [utc(2025, 11, 30, 16, 59), utc(2025, 10, 31, 17, 0), utc(2025, 10, 31, 16, 59),
+          utc(2025, 11, 30, 17, 0)]  # fmt: skip
+    rows = build_rows([bar("FPT", t) for t in ts], NOW, "r")  # cố ý lộn xộn
+    groups = group_rows_by_month(rows)
+    assert [[r["bar_ts"] for r in g] for g in groups] == [
+        [utc(2025, 10, 31, 16, 59)],
+        [utc(2025, 10, 31, 17, 0), utc(2025, 11, 30, 16, 59)],
+        [utc(2025, 11, 30, 17, 0)],
+    ]  # 10/2025 | 11/2025 | 12/2025 giờ VN
+
+
+def test_writer_gets_one_group_per_vn_month_in_order(tmp_path):
+    bars = [
+        bar("FPT", utc(2026, 1, 31, 16, 59)),  # 23:59 31/01 VN
+        bar("FPT", utc(2026, 1, 31, 17, 0)),  # 00:00 01/02 VN
+        bar("FPT", utc(2026, 1, 5, 3, 0)),
+        bar("FPT", utc(2026, 3, 2, 3, 0)),
+    ]
+    col, w, _ = make(tmp_path, FakeClient({"FPT": bars}), since=date(2026, 1, 1))
+    col.run()
+    groups = w.groups_by_path["/data/raw/intraday_history/source=vci/year=2026/FPT.parquet"]
+    assert [[r["bar_ts"] for r in g] for g in groups] == [
+        [utc(2026, 1, 5, 3, 0), utc(2026, 1, 31, 16, 59)],
+        [utc(2026, 1, 31, 17, 0)],
+        [utc(2026, 3, 2, 3, 0)],
+    ]
+
+
+def test_new_year_split_files_each_month_grouped(tmp_path):
+    bars = [bar("FPT", utc(2025, 12, 31, 16, 59)), bar("FPT", utc(2025, 12, 31, 17, 0))]
+    col, w, _ = make(tmp_path, FakeClient({"FPT": bars}), since=date(2025, 1, 1))
+    col.run()
+    assert {p[-21:]: len(g) for p, g in w.groups_by_path.items()} == {
+        "year=2025/FPT.parquet": 1,
+        "year=2026/FPT.parquet": 1,
+    }
+
+
+# ------------------------------------------------------------- không ghi lại khi không đổi
+
+P26 = "/data/raw/intraday_history/source=vci/year=2026/FPT.parquet"
+
+
+def rerun(tmp_path, data, reader):
+    col, w, st = make(tmp_path, FakeClient(data), reader=reader)
+    return col.run(), w
+
+
+def first_run(tmp_path, data):
+    col, w, _ = make(tmp_path, FakeClient(data))
+    col.run()
+    return w
+
+
+def test_unchanged_current_year_not_rewritten(tmp_path):
+    data = two_years()
+    reader = FakeReader.after(first_run(tmp_path, data))
+    out, w = rerun(tmp_path, data, reader)
+    assert list(w.by_path) == []  # 2025 đã done (bỏ qua); 2026 y hệt -> không ghi
+    assert out["files_unchanged"] == 1 and out["files_written"] == 0 and out["rows_written"] == 0
+    assert out["symbols_done"] == ["FPT"]
+
+
+def test_unchanged_only_ingest_columns_differ(tmp_path):
+    data = {"FPT": mins("FPT", T26, 5)}
+    w1 = first_run(tmp_path, data)
+    path, rows = next(iter(w1.by_path.items()))
+    rows = [{**r, "ingest_ts": T26, "ingest_run_id": "khac", "available_at": T26} for r in rows]
+    out, w = rerun(tmp_path, data, FakeReader({path: (1, rows)}))
+    assert out["files_unchanged"] == 1 and w.writes == []
+
+
+def test_extra_bar_rewrites(tmp_path):
+    w1 = first_run(tmp_path, {"FPT": mins("FPT", T26, 5)})
+    out, w = rerun(tmp_path, {"FPT": mins("FPT", T26, 6)}, FakeReader.after(w1))
+    assert out["files_written"] == 1 and out["files_unchanged"] == 0 and out["rows_written"] == 6
+    assert len(w.by_path[P26]) == 6
+
+
+def test_changed_close_rewrites(tmp_path):
+    data = {"FPT": mins("FPT", T26, 5)}
+    reader = FakeReader.after(first_run(tmp_path, data))
+    data["FPT"][2] = bar("FPT", data["FPT"][2].bar_ts, close=99.0)
+    out, w = rerun(tmp_path, data, reader)
+    assert out["files_written"] == 1 and out["files_unchanged"] == 0
+    assert [r["close"] for r in w.by_path[P26]].count(99.0) == 1
+
+
+def test_single_row_group_file_is_upgraded_even_if_identical(tmp_path):
+    bars = [bar("FPT", utc(2026, 1, 5, 3, 0)), bar("FPT", utc(2026, 3, 2, 3, 0))]  # 2 tháng
+    w1 = first_run(tmp_path, {"FPT": bars})
+    rows = w1.by_path[P26]
+    reader = FakeReader({P26: (1, rows)})  # file cũ: 1 row group, dữ liệu y hệt
+    out, w = rerun(tmp_path, {"FPT": bars}, reader)
+    assert reader.calls == [(P26, 2)]
+    assert out["files_written"] == 1 and out["files_unchanged"] == 0
+    assert len(w.groups_by_path[P26]) == 2
+
+
+def test_reader_error_falls_back_to_rewrite(tmp_path):
+    class Bad:
+        def read_existing(self, path, n):
+            raise OSError("hdfs lỗi")
+
+    out, w = rerun(tmp_path, {"FPT": mins("FPT", T26, 3)}, Bad())
+    assert out["files_written"] == 1 and out["files_unchanged"] == 0
+
+
+def test_bars_identical_order_insensitive_and_strict():
+    rows = build_rows(mins("FPT", T26, 3), NOW, "a")
+    ex = [{k: r[k] for k in ("bar_ts", "open", "high", "low", "close", "volume")} for r in rows]
+    assert bars_identical(list(reversed(ex)), rows)
+    assert not bars_identical(ex[:2], rows)
+    assert not bars_identical([{**ex[0], "volume": 1}, *ex[1:]], rows)
+    naive = [{**ex[0], "bar_ts": ex[0]["bar_ts"].replace(tzinfo=None)}, *ex[1:]]
+    assert bars_identical(naive, rows)  # bar_ts không múi giờ coi là UTC
+
+
 # ------------------------------------------------------------- chạy lại / idempotent
 
 
@@ -211,7 +379,7 @@ def test_rerun_skips_past_year_and_rewrites_current(tmp_path):
     data = two_years()
     col, w, st = make(tmp_path, FakeClient(data))
     col.run()
-    first = {p: list(r) for p, r in w.writes}
+    first = w.by_path
     assert st.is_done("intraday_history", "intraday_history/FPT/2025")
     assert not st.is_done("intraday_history", "intraday_history/FPT/2026")
 
@@ -389,6 +557,7 @@ def test_run_intraday_history_entrypoint_explicit_symbols_win(tmp_path):
         ["fpt"], group="vn30", since=date(2026, 1, 1),
         client=FakeClient({"FPT": mins("FPT", T26, 3)}), writer=w,
         state=JsonFileStateStore(tmp_path / "s.json"), clock=lambda: NOW, to_table=IDENT,
+        reader=FakeReader(),
     )  # fmt: skip
     assert out["symbols_done"] == ["FPT"] and out["rows_written"] == 3
     with pytest.raises(ValueError):
@@ -430,3 +599,163 @@ def test_rows_to_table_schema_pyarrow():
     assert t.column_names == list(file_columns())
     assert pa.types.is_timestamp(t.schema.field("bar_ts").type)
     assert t.num_rows == 1
+
+
+def test_regroup_job_exit_codes(monkeypatch, capsys):
+    path = Path(__file__).parents[2] / "jobs/ingest/regroup_intraday_history.py"
+    spec = importlib.util.spec_from_file_location("job_regroup", path)
+    job = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(job)
+    seen = {}
+
+    def fake(symbols, years, dry_run):
+        seen.update(symbols=symbols, years=years, dry_run=dry_run)
+        return {"failed": [{"path": "p", "reason": "x"}] if dry_run else []}
+
+    monkeypatch.setattr(job, "regroup_history_files", fake)
+    monkeypatch.setattr(sys, "argv", ["x", "--symbols", "fpt,vnm", "--years", "2025", "--dry-run"])
+    assert job.main() == 1
+    assert seen == {"symbols": ["FPT", "VNM"], "years": [2025], "dry_run": True}
+    monkeypatch.setattr(sys, "argv", ["x"])
+    assert job.main() == 0
+    assert len(capsys.readouterr().out.strip().splitlines()) == 2
+
+
+# ------------------------------------------------------------- regroup / ghi thật (pyarrow)
+# Chạy trong image collector; ở máy không có pyarrow/fsspec thì bỏ qua.
+
+REGROUP_TS = [
+    utc(2025, 10, 31, 16, 59),
+    utc(2025, 10, 31, 17, 0),
+    utc(2025, 11, 5, 3, 0),
+    utc(2025, 11, 30, 17, 0),
+    utc(2025, 12, 20, 3, 0),
+]  # fmt: skip  -> tháng VN: 10 | 11 11 | 12 12
+
+
+class Env:
+    def __init__(self):
+        self.pa = pytest.importorskip("pyarrow")
+        self.pq = pytest.importorskip("pyarrow.parquet")
+        fsspec = pytest.importorskip("fsspec")
+        self.fs = fsspec.filesystem("memory")
+        self.base = f"/t{id(self):x}"
+        self.fs.makedirs(self.base, exist_ok=True)
+
+    def put(self, sym, year, bars, row_group_size=None):
+        rows = build_rows(sorted(bars, key=lambda b: b.bar_ts), NOW, "rid")
+        t = mod.rows_to_table(rows)
+        path = file_path(sym, year, self.base)
+        self.fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
+        with self.fs.open(path, "wb") as f:
+            self.pq.write_table(t, f, row_group_size=row_group_size)
+        return path, t
+
+    def info(self, path):
+        with self.fs.open(path, "rb") as f:
+            md = self.pq.ParquetFile(f).metadata
+            return md.num_rows, md.num_row_groups
+
+    def read(self, path):
+        with self.fs.open(path, "rb") as f:
+            return self.pq.read_table(f)
+
+    def files(self):
+        return sorted(self.fs.find(self.base))
+
+
+@pytest.fixture
+def env():
+    return Env()
+
+
+def test_regroup_splits_by_month_and_preserves_data(env):
+    path, orig = env.put("FPT", 2025, [bar("FPT", t, 1.0 + i) for i, t in enumerate(REGROUP_TS)])
+    assert env.info(path) == (5, 1)
+    out = regroup_history_files(["FPT"], [2025], fs=env.fs, base=env.base)
+    assert out["files_total"] == 1 and out["regrouped"] == 1 and out["failed"] == []
+    assert out["rows_total_before"] == out["rows_total_after"] == 5
+    assert env.info(path) == (5, 3)
+    assert env.read(path).equals(orig.sort_by("bar_ts"))
+    assert env.files() == [path]  # không sót file tạm/bak
+    assert out["files"] == [
+        {
+            "path": path,
+            "status": "regrouped",
+            "rows": 5,
+            "row_groups_before": 1,
+            "row_groups_after": 3,
+        }  # fmt: skip
+    ]
+    row_groups = env.pq.ParquetFile(env.fs.open(path, "rb")).metadata
+    assert [row_groups.row_group(i).num_rows for i in range(3)] == [1, 2, 2]
+
+
+def test_regroup_skips_already_grouped(env):
+    env.put("FPT", 2025, [bar("FPT", t) for t in REGROUP_TS])
+    regroup_history_files(fs=env.fs, base=env.base)
+    before = env.files()
+    out = regroup_history_files(fs=env.fs, base=env.base)
+    assert out["already_grouped"] == 1 and out["regrouped"] == 0 and env.files() == before
+
+
+def test_regroup_dry_run_replaces_nothing(env):
+    path, orig = env.put("FPT", 2025, [bar("FPT", t) for t in REGROUP_TS])
+    raw_before = env.fs.cat(path)
+    out = regroup_history_files(dry_run=True, fs=env.fs, base=env.base)
+    assert out["dry_run"] and out["regrouped"] == 1 and out["files"][0]["row_groups_after"] == 3
+    assert env.fs.cat(path) == raw_before and env.files() == [path]
+
+
+def test_regroup_verification_failure_keeps_original(env, monkeypatch):
+    import stocklake.common.hdfs as hdfs
+
+    path, _ = env.put("FPT", 2025, [bar("FPT", t) for t in REGROUP_TS])
+    raw_before = env.fs.cat(path)
+    real = hdfs.write_parquet_row_groups_atomic
+
+    def lossy(tables, p, fs=None):  # đánh rơi dòng cuối của nhóm cuối
+        tables = list(tables)
+        tables[-1] = tables[-1].slice(0, 0)
+        real(tables, p, fs=fs)
+
+    monkeypatch.setattr(hdfs, "write_parquet_row_groups_atomic", lossy)
+    out = regroup_history_files(fs=env.fs, base=env.base)
+    assert out["regrouped"] == 0 and len(out["failed"]) == 1 and out["critical"] == []
+    assert out["failed"][0]["path"] == path
+    assert env.fs.cat(path) == raw_before and env.files() == [path]  # file tạm đã xoá
+
+
+def test_regroup_filters_symbols_and_years(env):
+    env.put("FPT", 2025, [bar("FPT", t) for t in REGROUP_TS])
+    other, _ = env.put("VNM", 2025, [bar("VNM", t) for t in REGROUP_TS])
+    out = regroup_history_files(["FPT"], [2025], fs=env.fs, base=env.base)
+    assert out["files_total"] == 1 and env.info(other) == (5, 1)
+
+
+def test_collector_real_io_month_groups_unchanged_and_upgrade(tmp_path, env):
+    from stocklake.ingestion.collectors.intraday_history import HdfsHistoryReader, HdfsParquetWriter
+
+    data = {"FPT": []}
+    clock = lambda: utc(2026, 11, 24, 12, 0)  # noqa: E731
+
+    def run():
+        st = JsonFileStateStore(tmp_path / "s.json")
+        col = IntradayHistoryCollector(
+            FakeClient(data), st, HdfsParquetWriter(env.fs), ["FPT"], date(2026, 1, 1),
+            clock=clock, base=env.base, reader=HdfsHistoryReader(env.fs),
+        )  # fmt: skip
+        return col.run()
+
+    data["FPT"] = [bar("FPT", utc(2026, m, d, 3, 0)) for m, d in ((1, 5), (1, 6), (2, 5), (4, 5))]
+    p = file_path("FPT", 2026, env.base)
+    out = run()
+    assert out["files_written"] == 1 and env.info(p) == (4, 3)
+    before = env.fs.cat(p)
+    out = run()
+    assert out["files_unchanged"] == 1 and out["files_written"] == 0 and env.fs.cat(p) == before
+    # file cũ một row group, cùng dữ liệu -> được nâng cấp
+    env.put("FPT", 2026, data["FPT"])
+    assert env.info(p) == (4, 1)
+    out = run()
+    assert out["files_written"] == 1 and env.info(p) == (4, 3)
