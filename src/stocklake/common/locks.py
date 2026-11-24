@@ -12,6 +12,11 @@ Hết hạn: file có `expires_at` đã qua coi như không ai giữ và bị xo
 dở); quá hạn ân hạn mà vẫn hỏng thì coi là mồ côi và xoá. Việc xoá file hết hạn kiểm lại nội
 dung ngay trước khi xoá nhưng vẫn còn cửa sổ race rất nhỏ (khoá hết hạn vốn là tình huống hiếm).
 
+TTL ngắn + heartbeat: mặc định khoá ghi sống 5 phút, khoá đọc 10 phút. Khi giữ khoá, một luồng
+daemon `lock-heartbeat-<name>` gọi `refresh()` mỗi `ttl_s / 3` giây nên bên giữ còn sống không
+bao giờ mất khoá dù làm lâu; tiến trình chết (kể cả SIGKILL) thì heartbeat dừng và bảng được
+giải phóng sau tối đa một TTL.
+
 Chỉ dùng thư viện chuẩn; không import pyspark.
 """
 
@@ -33,6 +38,11 @@ from stocklake.common.logging import get_logger
 log = get_logger("stocklake.common.locks")
 
 CORRUPT_GRACE_S = 60.0  # ân hạn cho file khoá hỏng (xem docstring module)
+DEFAULT_WRITE_TTL_S = 300.0  # writer đo được giữ 6–26 s
+DEFAULT_READ_TTL_S = 600.0  # reader (DQ) đo được giữ 30–40 s
+# Phải lớn hơn cả hai TTL: bên chờ luôn sống lâu hơn một bên giữ đã chết.
+DEFAULT_WAIT_TIMEOUT_S = 900.0
+HEARTBEAT_JOIN_S = 5.0  # chờ tối đa luồng heartbeat khi thoát; không treo job
 _NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
@@ -202,7 +212,12 @@ def _validate_name(name: str) -> None:
 
 
 class LockHandle:
-    """Tay cầm khoá đang giữ."""
+    """Tay cầm khoá đang giữ.
+
+    `lost`: True khi một lần gia hạn thấy khoá đã mất/bị chiếm (thân `with` KHÔNG bị ngắt; bên
+    gọi tự kiểm sau đoạn găng). `refreshes`: số lần gia hạn thành công. `last_refresh_error`:
+    lỗi gần nhất khi gia hạn (None nếu chưa lỗi).
+    """
 
     def __init__(
         self, fs: LockFs, kind: str, id: str, path: str, owner: str, ttl_s: float, clock: Callable
@@ -216,32 +231,77 @@ class LockHandle:
         self.ttl_s = ttl_s
         self.waited_s = 0.0
         self.acquired_at: datetime = clock()
+        self.lost = False
+        self.refreshes = 0
+        self.last_refresh_error: str | None = None
+        # refresh() và _release() loại trừ nhau (heartbeat chạy ở luồng khác)
+        self._mu = threading.Lock()
+        self._released = False
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def _payload(self) -> bytes:
         return _payload(self.kind, self.id, self.owner, self.acquired_at, self.ttl_s)
 
     def refresh(self) -> None:
         """Gia hạn thêm `ttl_s` kể từ bây giờ. Ném LockLost nếu khoá không còn là của mình."""
-        info = _parse(self._fs.read(self.path))
-        if info is None or info["id"] != self.id:
-            raise LockLost(f"Khoá {self.path} không còn thuộc {self.id}")
-        now = self._clock()
-        data = _payload(self.kind, self.id, self.owner, self.acquired_at, self.ttl_s, now)
-        overwrite = getattr(self._fs, "overwrite", None)
-        if overwrite is not None:
-            overwrite(self.path, data)
-            return
-        # Fallback: xoá rồi tạo lại (có cửa sổ ngắn không có file)
-        self._fs.delete(self.path)
-        if not self._fs.create_exclusive(self.path, data):
-            raise LockLost(f"Khoá {self.path} bị chiếm khi gia hạn")
+        with self._mu:
+            if self._released:  # đã bắt đầu nhả: không gia hạn, không tạo lại file
+                raise LockLost(f"Khoá {self.path} đã nhả")
+            info = _parse(self._fs.read(self.path))
+            if info is None or info["id"] != self.id:
+                self.lost = True
+                raise LockLost(f"Khoá {self.path} không còn thuộc {self.id}")
+            now = self._clock()
+            data = _payload(self.kind, self.id, self.owner, self.acquired_at, self.ttl_s, now)
+            overwrite = getattr(self._fs, "overwrite", None)
+            if overwrite is not None:
+                overwrite(self.path, data)
+            else:
+                # Fallback: xoá rồi tạo lại (có cửa sổ ngắn không có file)
+                self._fs.delete(self.path)
+                if not self._fs.create_exclusive(self.path, data):
+                    self.lost = True
+                    raise LockLost(f"Khoá {self.path} bị chiếm khi gia hạn")
+            self.refreshes += 1
+
+    def _heartbeat(self, interval_s: float) -> None:
+        # Nhịp = ttl/3: lỡ một nhịp (lỗi tạm thời) vẫn còn hai lần thử trước khi khoá hết hạn.
+        while not self._stop.wait(interval_s):
+            try:
+                self.refresh()
+            except LockLost as exc:
+                if self._released or self._stop.is_set():
+                    return  # đang nhả: không phải mất khoá
+                log.error("Mất khoá %s, dừng heartbeat: %s", self.path, exc)
+                return
+            except Exception as exc:  # noqa: BLE001 - lỗi IO tạm thời (NameNode chập chờn)
+                self.last_refresh_error = f"{type(exc).__name__}: {exc}"
+                log.warning("Gia hạn khoá %s lỗi, thử lại nhịp sau: %s", self.path, exc)
+
+    def _start_heartbeat(self, name: str, interval_s: float) -> None:
+        self._thread = threading.Thread(
+            target=self._heartbeat, args=(interval_s,), name=f"lock-heartbeat-{name}", daemon=True
+        )
+        self._thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        self._stop.set()
+        th = self._thread
+        if th is not None and th is not threading.current_thread():
+            th.join(HEARTBEAT_JOIN_S)
+            if th.is_alive():  # refresh đang treo ở fs; _release sẽ chờ nó qua _mu
+                log.warning("Heartbeat khoá %s chưa dừng sau %.0fs", self.path, HEARTBEAT_JOIN_S)
 
     def _release(self) -> None:
-        info = _parse(self._fs.read(self.path))
-        if info is not None and info["id"] == self.id:
-            self._fs.delete(self.path)
-        else:
-            log.warning("Khoá %s không còn của %s, bỏ qua khi nhả", self.path, self.id)
+        self._stop_heartbeat()  # dừng heartbeat TRƯỚC khi xoá file
+        with self._mu:
+            self._released = True
+            info = _parse(self._fs.read(self.path))
+            if info is not None and info["id"] == self.id:
+                self._fs.delete(self.path)
+            else:
+                log.warning("Khoá %s không còn của %s, bỏ qua khi nhả", self.path, self.id)
 
 
 def _payload(
@@ -358,21 +418,51 @@ def _default_owner() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+def _check_timing(
+    label: str, ttl_s: float, wait_timeout_s: float, waits_for_ttl_s: float, hb: float | None
+) -> float:
+    """Kiểm tham số thời gian; trả nhịp heartbeat."""
+    if ttl_s <= 0:
+        raise ValueError(f"{label}: ttl_s phải > 0 (nhận {ttl_s})")
+    if wait_timeout_s <= 0:
+        raise ValueError(f"{label}: wait_timeout_s phải > 0 (nhận {wait_timeout_s})")
+    if wait_timeout_s <= waits_for_ttl_s:
+        log.warning(
+            "%s: wait_timeout_s=%.0f <= TTL %.0f của khoá phải chờ; holder chết có thể làm hết giờ",
+            label,
+            wait_timeout_s,
+            waits_for_ttl_s,
+        )
+    interval = ttl_s / 3 if hb is None else hb
+    if interval <= 0:
+        raise ValueError(f"{label}: heartbeat_interval_s phải > 0 (nhận {hb})")
+    return interval
+
+
 @contextmanager
 def read_lock(
     fs: LockFs,
     name: str,
     *,
     owner: str | None = None,
-    ttl_s: float = 3600.0,
-    wait_timeout_s: float = 900.0,
+    ttl_s: float = DEFAULT_READ_TTL_S,
+    wait_timeout_s: float = DEFAULT_WAIT_TIMEOUT_S,
     poll_s: float = 2.0,
     base: str = "/locks",
     clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], None] | None = None,
+    heartbeat: bool = True,
+    heartbeat_interval_s: float | None = None,
 ) -> Iterator[LockHandle]:
-    """Khoá đọc: nhiều reader cùng giữ; nhường writer đang giữ hoặc đang chờ."""
+    """Khoá đọc: nhiều reader cùng giữ; nhường writer đang giữ hoặc đang chờ.
+
+    `heartbeat=True`: luồng nền gia hạn khoá mỗi `heartbeat_interval_s` (mặc định ttl_s/3).
+    """
     _validate_name(name)
+    # reader chỉ chờ writer
+    hb_s = _check_timing(
+        f"read_lock {name}", ttl_s, wait_timeout_s, DEFAULT_WRITE_TTL_S, heartbeat_interval_s
+    )
     clock = clock or _now
     owner = owner or _default_owner()
     d = f"{base.rstrip('/')}/{name}"
@@ -402,6 +492,8 @@ def read_lock(
         w.wait([_fmt(info, wpath)])
     handle.waited_s = w.waited_s()
     log.info("read_lock %s: đã giữ %s sau %.1fs chờ", name, lid, handle.waited_s)
+    if heartbeat:
+        handle._start_heartbeat(name, hb_s)
     try:
         yield handle
     finally:
@@ -415,15 +507,26 @@ def write_lock(
     name: str,
     *,
     owner: str | None = None,
-    ttl_s: float = 1800.0,
-    wait_timeout_s: float = 900.0,
+    ttl_s: float = DEFAULT_WRITE_TTL_S,
+    wait_timeout_s: float = DEFAULT_WAIT_TIMEOUT_S,
     poll_s: float = 2.0,
     base: str = "/locks",
     clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], None] | None = None,
+    heartbeat: bool = True,
+    heartbeat_interval_s: float | None = None,
 ) -> Iterator[LockHandle]:
-    """Khoá ghi: độc quyền; giành writer.lock trước (chặn reader mới) rồi chờ reader cũ xong."""
+    """Khoá ghi: độc quyền; giành writer.lock trước (chặn reader mới) rồi chờ reader cũ xong.
+
+    `heartbeat=True`: luồng nền gia hạn writer.lock mỗi `heartbeat_interval_s` (mặc định
+    ttl_s/3), bắt đầu ngay khi giành được writer.lock (cả lúc còn chờ reader).
+    """
     _validate_name(name)
+    # writer chờ cả writer khác lẫn reader
+    waits_for = max(ttl_s, DEFAULT_WRITE_TTL_S, DEFAULT_READ_TTL_S)
+    hb_s = _check_timing(
+        f"write_lock {name}", ttl_s, wait_timeout_s, waits_for, heartbeat_interval_s
+    )
     clock = clock or _now
     owner = owner or _default_owner()
     d = f"{base.rstrip('/')}/{name}"
@@ -445,7 +548,9 @@ def write_lock(
             log.info("write_lock %s: chờ writer %s", name, _fmt(info, wpath))
             waiting_logged = True
         w.wait([_fmt(info, wpath)])  # chưa tạo file nên không cần dọn
-    # Pha 2: chờ reader còn sống
+    # Pha 2: chờ reader còn sống; heartbeat chạy luôn để writer.lock không hết hạn khi chờ lâu
+    if heartbeat:
+        handle._start_heartbeat(name, hb_s)
     try:
         waiting_logged = False
         while True:
@@ -462,6 +567,8 @@ def write_lock(
                 log.info("write_lock %s: chờ %d reader: %s", name, len(holders), "; ".join(holders))
                 waiting_logged = True
             w.wait(holders)
+        if handle.lost:  # writer.lock bị chiếm khi đang chờ reader: không được ghi
+            raise LockLost(f"write_lock {name}: mất {wpath} khi chờ reader")
     except BaseException:
         handle._release()
         raise

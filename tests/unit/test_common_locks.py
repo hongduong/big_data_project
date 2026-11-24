@@ -327,3 +327,255 @@ def test_threads_two_writers_mutual_exclusion():
         th.join(20)
     assert not bad
     assert fs.list(D) == []
+
+
+# --- TTL ngắn + heartbeat (luồng thật, nhịp vài chục ms; assert rộng để không flaky) ---
+
+
+def hb_threads(name="t"):
+    return [
+        th for th in threading.enumerate() if th.name == f"lock-heartbeat-{name}" and th.is_alive()
+    ]
+
+
+def expires(fs, path):
+    return datetime.fromisoformat(json.loads(fs.read(path))["expires_at"])
+
+
+class Capture:
+    """Bắt log của module (logger stocklake không propagate nên caplog không thấy)."""
+
+    def __init__(self):
+        import logging
+
+        self.records = []
+        self.h = logging.Handler()
+        self.h.emit = self.records.append
+
+    def __enter__(self):
+        locks.log.addHandler(self.h)
+        return self
+
+    def __exit__(self, *a):
+        locks.log.removeHandler(self.h)
+
+    def levels(self, level):
+        return [r.getMessage() for r in self.records if r.levelname == level]
+
+
+def test_defaults_short_ttl():
+    import inspect
+
+    assert locks.DEFAULT_WRITE_TTL_S == 300.0
+    assert locks.DEFAULT_READ_TTL_S == 600.0
+    assert locks.DEFAULT_WAIT_TIMEOUT_S == 900.0
+    assert locks.DEFAULT_WAIT_TIMEOUT_S > max(locks.DEFAULT_WRITE_TTL_S, locks.DEFAULT_READ_TTL_S)
+    for fn, ttl in [(write_lock, 300.0), (read_lock, 600.0)]:
+        p = inspect.signature(fn.__wrapped__).parameters
+        assert p["ttl_s"].default == ttl
+        assert p["wait_timeout_s"].default == 900.0
+        assert p["heartbeat"].default is True
+        assert p["heartbeat_interval_s"].default is None
+    fs = MemoryLockFs()
+    with write_lock(fs, "t") as w:
+        assert w.ttl_s == 300.0
+        exp = expires(fs, W) - datetime.fromisoformat(json.loads(fs.read(W))["acquired_at"])
+        assert exp == timedelta(seconds=300)
+    with read_lock(fs, "t") as r:
+        assert r.ttl_s == 600.0
+    assert not hb_threads()
+
+
+def test_timing_validation_and_warning():
+    fs = MemoryLockFs()
+    with pytest.raises(ValueError):
+        with write_lock(fs, "t", wait_timeout_s=0):
+            pass
+    with pytest.raises(ValueError):
+        with read_lock(fs, "t", ttl_s=0):
+            pass
+    with pytest.raises(ValueError):
+        with read_lock(fs, "t", heartbeat_interval_s=0):
+            pass
+    with Capture() as cap:
+        with write_lock(fs, "t", wait_timeout_s=100.0):  # < TTL đọc/ghi mặc định -> chỉ cảnh báo
+            pass
+        with read_lock(fs, "t", wait_timeout_s=200.0):  # < TTL ghi 300
+            pass
+        with write_lock(fs, "t"), read_lock(fs, "u"):  # mặc định: không cảnh báo
+            pass
+    assert len([m for m in cap.levels("WARNING") if "wait_timeout_s" in m]) == 2
+    assert fs.files == {}
+
+
+def test_heartbeat_keeps_lock_beyond_ttl():
+    fs = MemoryLockFs()
+    got = {}
+
+    def second():
+        with write_lock(fs, "t", ttl_s=0.3, poll_s=0.01, wait_timeout_s=10.0, owner="w2"):
+            got["at"] = time.monotonic()
+
+    with write_lock(fs, "t", ttl_s=0.3, heartbeat_interval_s=0.1, owner="w1") as w1:
+        exp0 = expires(fs, W)
+        th = threading.Thread(target=second)
+        th.start()
+        time.sleep(1.2)  # 4 TTL
+        assert "at" not in got  # w2 vẫn chờ
+        assert json.loads(fs.read(W))["id"] == w1.id
+        assert w1.refreshes >= 2
+        assert w1.lost is False
+        assert expires(fs, W) > exp0
+        released = time.monotonic()
+    th.join(10)
+    assert not th.is_alive()
+    assert got["at"] >= released
+    assert fs.list(D) == []
+    assert not hb_threads()
+
+
+def test_dead_holder_taken_over_after_ttl():
+    fs = MemoryLockFs()
+    cm = write_lock(fs, "t", ttl_s=0.4, heartbeat=False, owner="dead")
+    dead = cm.__enter__()  # "tiến trình chết": không bao giờ nhả, không heartbeat
+    start = time.monotonic()
+    with write_lock(fs, "t", poll_s=0.02, wait_timeout_s=10.0) as w:
+        took = time.monotonic() - start
+        assert json.loads(fs.read(W))["id"] == w.id != dead.id
+        assert 0.25 <= w.waited_s <= 2.0
+        assert took >= 0.25
+    assert fs.list(D) == []
+
+
+def test_without_heartbeat_waiter_takes_over_and_old_holder_cannot_refresh():
+    fs = MemoryLockFs()
+    with write_lock(fs, "t", ttl_s=0.2, heartbeat=False, owner="slow") as slow:
+        with write_lock(fs, "t", ttl_s=5.0, poll_s=0.01, wait_timeout_s=10.0, owner="new") as new:
+            assert new.waited_s > 0
+            with pytest.raises(locks.LockLost):
+                slow.refresh()
+            assert slow.lost is True
+            assert slow.refreshes == 0
+        # new đã nhả; giả lập người khác lại chiếm để kiểm slow không xoá nhầm
+        fs.files[W] = lock_doc("writer", "other", locks._now(), ttl=100)
+    assert json.loads(fs.read(W))["id"] == "other"
+
+
+def test_lost_detected_by_heartbeat_and_foreign_file_kept():
+    fs = MemoryLockFs()
+    with Capture() as cap:
+        with write_lock(fs, "t", ttl_s=0.3, heartbeat_interval_s=0.02) as w:
+            fs.files[W] = lock_doc("writer", "thief", locks._now(), ttl=100)
+            deadline = time.monotonic() + 5
+            while not w.lost and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert w.lost is True
+            deadline = time.monotonic() + 5
+            while hb_threads() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert not hb_threads()  # heartbeat tự dừng
+    assert json.loads(fs.read(W))["id"] == "thief"
+    assert len([m for m in cap.levels("ERROR") if "Mất khoá" in m]) == 1
+
+
+def test_lost_when_file_deleted_reader():
+    fs = MemoryLockFs()
+    with read_lock(fs, "t", ttl_s=0.3, heartbeat_interval_s=0.02) as r:
+        fs.delete(r.path)
+        deadline = time.monotonic() + 5
+        while not r.lost and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert r.lost
+        time.sleep(0.1)
+        assert fs.read(r.path) is None  # heartbeat không tạo lại file
+    assert fs.list(D) == []
+
+
+def test_transient_refresh_error_retried():
+    class Flaky(MemoryLockFs):
+        def __init__(self):
+            super().__init__()
+            self.fail = 0
+
+        def overwrite(self, path, data):
+            if self.fail:
+                self.fail -= 1
+                raise OSError("NameNode hiccup")
+            super().overwrite(path, data)
+
+    fs = Flaky()
+    with Capture() as cap:
+        with write_lock(fs, "t", ttl_s=0.6, heartbeat_interval_s=0.03) as w:
+            fs.fail = 1
+            deadline = time.monotonic() + 5
+            while (w.last_refresh_error is None or w.refreshes < 2) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert "NameNode hiccup" in w.last_refresh_error
+            before = w.refreshes
+            time.sleep(0.15)
+            assert w.refreshes > before  # nhịp sau thành công
+            assert not w.lost
+            assert json.loads(fs.read(W))["id"] == w.id
+    assert any("NameNode hiccup" in m for m in cap.levels("WARNING"))
+    assert fs.list(D) == []
+
+
+def test_no_heartbeat_thread_leak():
+    fs = MemoryLockFs()
+    fast = dict(heartbeat_interval_s=0.01)
+    with write_lock(fs, "t", **fast), read_lock(fs, "u", **fast):
+        assert len(hb_threads("t")) == 1 and len(hb_threads("u")) == 1
+        assert all(th.daemon for th in hb_threads("t"))
+    assert not hb_threads("t") and not hb_threads("u")
+    with pytest.raises(RuntimeError):
+        with read_lock(fs, "t", **fast):
+            raise RuntimeError("x")
+    assert not hb_threads()
+    # LockTimeout ở pha 1 (writer khác giữ) và pha 2 (reader giữ)
+    with write_lock(fs, "t", owner="holder", **fast):
+        with pytest.raises(LockTimeout):
+            with write_lock(fs, "t", poll_s=0.01, wait_timeout_s=0.05, **fast):
+                pass
+    with read_lock(fs, "t", heartbeat=False):
+        with pytest.raises(LockTimeout):
+            with write_lock(fs, "t", poll_s=0.01, wait_timeout_s=0.05, **fast):
+                pass
+        assert not hb_threads()
+    assert not hb_threads()
+    assert fs.list(D) == []
+
+
+def test_release_refresh_race_leaves_no_file():
+    class Slow(MemoryLockFs):
+        def overwrite(self, path, data):
+            time.sleep(0.0005)  # nới cửa sổ race
+            super().overwrite(path, data)
+
+    fs = Slow()
+
+    def worker(i):
+        for _ in range(40):
+            with write_lock(fs, "t", heartbeat_interval_s=0.001, poll_s=0.001, wait_timeout_s=20):
+                time.sleep(0.002)
+            with read_lock(fs, "t", heartbeat_interval_s=0.001, poll_s=0.001, wait_timeout_s=20):
+                time.sleep(0.002)
+
+    ts = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+    for th in ts:
+        th.start()
+    for th in ts:
+        th.join(60)
+    assert not any(th.is_alive() for th in ts)
+    time.sleep(0.05)
+    assert fs.list(D) == []
+    assert not hb_threads()
+
+
+def test_refresh_after_release_raises_and_does_not_recreate():
+    fs = MemoryLockFs()
+    with write_lock(fs, "t", heartbeat=False) as w:
+        pass
+    with pytest.raises(locks.LockLost):
+        w.refresh()
+    assert fs.list(D) == []
+    assert w.lost is False
