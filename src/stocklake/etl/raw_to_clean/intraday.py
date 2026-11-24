@@ -61,6 +61,11 @@ PRIO_HISTORY_VCI, PRIO_HISTORY_OTHER, PRIO_STREAM_REAL, PRIO_STREAM_REPLAY = 0, 
 _KEEP = "is_valid AND NOT is_untagged_replay"
 # Ước lượng ~128 MB Parquet mỗi file với dòng nến phút (~30 byte/dòng nén); cần đo lại.
 ROWS_PER_FILE = 4_000_000
+# Số phân vùng xáo trộn theo số dòng raw đọc vào: ~500 nghìn dòng mỗi phân vùng (mức đã đo ổn
+# với 5,6 triệu dòng / 12 phân vùng), không thấp hơn cấu hình sẵn có, làm tròn lên bội số của nó.
+SHUFFLE_KEY = "spark.sql.shuffle.partitions"
+ROWS_PER_SHUFFLE_PARTITION = 500_000
+MAX_SHUFFLE_PARTITIONS = 240
 
 
 def _valid_expr():
@@ -265,6 +270,29 @@ def _files_per_partition(clean_rows: int, partitions: int) -> int:
     return max(1, math.ceil(clean_rows / max(partitions, 1) / ROWS_PER_FILE))
 
 
+def shuffle_partitions_for(rows: int, base: int) -> int:
+    """Số phân vùng xáo trộn cho `rows` dòng raw; `base` là giá trị cấu hình sẵn (sàn và bước)."""
+    base = max(1, int(base))
+    need = math.ceil(max(0, int(rows)) / ROWS_PER_SHUFFLE_PARTITION)
+    if need <= base:
+        return base
+    return min(math.ceil(need / base) * base, max(MAX_SHUFFLE_PARTITIONS, base))
+
+
+def _tune_shuffle(
+    spark: SparkSession, stream: DataFrame | None, history: DataFrame | None, base_parts: int
+) -> tuple[int, int]:
+    """Đếm dòng raw sắp đọc rồi đặt `spark.sql.shuffle.partitions` cho phiên. Trả (số dòng, n).
+
+    Đếm trên khung raw chưa chiếu: Parquet chỉ cần footer (hoặc riêng cột bar_ts khi lọc tháng).
+    Người gọi chịu trách nhiệm trả cấu hình về giá trị cũ.
+    """
+    rows = sum(int(df.count()) for df in (stream, history) if df is not None)
+    n = shuffle_partitions_for(rows, base_parts)
+    spark.conf.set(SHUFFLE_KEY, str(n))
+    return rows, n
+
+
 # ---------------------------------------------------------------- fingerprint
 
 # Cột đi vào checksum: mọi thứ quyết định nội dung clean, TRỪ ingest_ts/ingest_run_id/cột Kafka
@@ -399,6 +427,7 @@ def _empty_result(mode: str) -> dict[str, Any]:
         "rejected": 0,
         "dropped_untagged_replay": 0,
         "partitions": 0,
+        "shuffle_partitions": 0,
         "clean_by_source": {},
         "months_total": 0,
         "months_candidates": 0,
@@ -429,7 +458,10 @@ def _scan(stream, history, result: dict[str, Any]) -> DataFrame | None:
     from pyspark import StorageLevel
     from pyspark.sql import functions as F
 
-    scan = _combine(stream, history).repartition("symbol", "bar_ts")
+    combined = _combine(stream, history)
+    # Số phân vùng tường minh (đã đặt theo số dòng ở `_tune_shuffle`): AQE không gộp lại.
+    n_parts = int(combined.sparkSession.conf.get(SHUFFLE_KEY))
+    scan = combined.repartition(n_parts, "symbol", "bar_ts")
     scan = scan.persist(StorageLevel.MEMORY_AND_DISK)
     try:
         s = scan.agg(
@@ -539,14 +571,23 @@ def run_intraday_raw_to_clean(
     to_fp = inc.months_to_fingerprint(mode, prev, candidates, clean_months, forced)
 
     scan = best = None
+    base_parts = int(spark.conf.get(SHUFFLE_KEY))
+
+    def tune(stream, history) -> None:
+        _, result["shuffle_partitions"] = _tune_shuffle(spark, stream, history, base_parts)
+
     try:
         if mode == inc.MODE_INCREMENTAL:
+            stream, history = _read_inputs(spark, to_fp, base)
+            if stream is not None or history is not None:
+                tune(stream, history)
             t_fp = time.monotonic()
-            fps = month_fingerprints(*_read_inputs(spark, to_fp, base))
+            fps = month_fingerprints(stream, history)
         else:
             # Mọi tháng quét đều dựng lại: một lần quét cho cả fingerprint lẫn clean.
             stream, history = _read_inputs(spark, to_fp, base)
             if stream is not None or history is not None:
+                tune(stream, history)
                 scan = _scan(stream, history, result)
             t_fp = time.monotonic()
             fps = scan_fingerprints(scan) if scan is not None else {}
@@ -611,6 +652,7 @@ def run_intraday_raw_to_clean(
             if stream is None and history is None:  # raw biến mất giữa chừng
                 log.warning("Không còn raw cho các tháng %s", plan.rebuild)
                 return finish(None)
+            tune(stream, history)
             scan = _scan(stream, history, result)
         if scan is not None:
             best, by_month = _build(scan, result)
@@ -629,6 +671,7 @@ def run_intraday_raw_to_clean(
         result["write_seconds"] = round(time.monotonic() - t1, 3)
         return finish(state)
     finally:
+        spark.conf.set(SHUFFLE_KEY, str(base_parts))
         for df in (best, scan):
             if df is not None:
                 df.unpersist()

@@ -468,3 +468,22 @@ def test_etl_has_no_own_lock_ttl():
     from stocklake.etl.raw_to_clean import _common
 
     assert not hasattr(_common, "LOCK_TTL_S") and not hasattr(_common, "refresh_quietly")
+
+
+@pytest.mark.parametrize(
+    ("rows", "base", "expected"),
+    [
+        (0, 12, 12),
+        (5_600_000, 12, 12),  # mức đã đo: giữ nguyên cấu hình
+        (6_000_001, 12, 24),
+        (27_600_000, 12, 60),  # 412 mã HOSE
+        (70_000_000, 12, 144),
+        (10**10, 12, 240),  # trần
+        (27_600_000, 1, 56),
+        (10, 300, 300),  # cấu hình sẵn cao hơn trần: không hạ
+    ],
+)
+def test_shuffle_partitions_for(rows, base, expected):
+    from stocklake.etl.raw_to_clean.intraday import shuffle_partitions_for
+
+    assert shuffle_partitions_for(rows, base) == expected

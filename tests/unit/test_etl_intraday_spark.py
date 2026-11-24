@@ -676,3 +676,23 @@ def test_daily_write_takes_lock(spark, tmp_path):
                 lambda s, t, f=None, **k: real(s, t, f, wait_timeout_s=0.05, poll_s=0.01),
             ):
                 run_daily_raw_to_clean(spark, None, fs.inner, base=f"file://{tmp_path}")
+
+
+def test_shuffle_partitions_follow_input_rows(spark, tmp_path, monkeypatch):
+    """Số phân vùng tính từ số dòng raw; cấu hình phiên trả về như cũ, kết quả clean không đổi."""
+    from stocklake.etl.raw_to_clean import intraday as mod
+
+    _new_locks()
+    rows = [hist_row("FPT", utc(2026, 1, 5, 3, m)) for m in range(7)]
+    _write_hist(spark, tmp_path, rows)
+    _write_stream(spark, tmp_path, [raw_row("VNM", utc(2026, 1, 5, 3, 0), kafka=3)], "2026-01-05")
+    base_parts = int(spark.conf.get(mod.SHUFFLE_KEY))
+    r = _run(spark, tmp_path, CountingLockFs(), full=True)
+    assert r["shuffle_partitions"] == base_parts and r["clean_rows"] == 8
+
+    monkeypatch.setattr(mod, "ROWS_PER_SHUFFLE_PARTITION", 1)
+    r = _run(spark, tmp_path, CountingLockFs(), full=True)
+    assert r["raw_rows"] == 8
+    assert r["shuffle_partitions"] == mod.shuffle_partitions_for(8, base_parts) > base_parts
+    assert r["clean_rows"] == 8
+    assert int(spark.conf.get(mod.SHUFFLE_KEY)) == base_parts
