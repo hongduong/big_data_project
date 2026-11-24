@@ -133,7 +133,7 @@ flowchart LR
 
 ### 2.2 Container và tài nguyên
 
-Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **23,5GB / 13 vCPU**.
+Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **24,5GB / 14 vCPU** (spark-driver nâng từ 2GB / 1 CPU lên 3GB / 2 CPU ngày 24/11/2026 sau số đo Lát 1).
 
 | Container | Số lượng | `mem_limit` | `cpus` | JVM heap / cấu hình |
 |---|---|---|---|---|
@@ -142,7 +142,7 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **23,5GB / 13 vCPU**.
 | HDFS DataNode | 3 | 1GB | 0,5 | `HDFS_DATANODE_OPTS=-Xmx512m` |
 | Spark Master | 1 | 1GB | 0,5 | `SPARK_DAEMON_MEMORY=512m` |
 | Spark Worker | 3 | 4GB | 2 | `SPARK_WORKER_CORES=2`, `SPARK_WORKER_MEMORY=3g`, `spark.executor.memory=3g` |
-| Spark driver (streaming / batch) | 1 | 2GB | 1 | `spark.driver.memory=1400m` |
+| Spark driver (streaming / batch) | 1 | 3GB | 2 | `spark.driver.memory=1400m` |
 | Collector / Scheduler | 1 | 1GB | 0,5 | Python |
 | Streamlit | 1 | 1GB | 0,5 | Python |
 
@@ -161,7 +161,7 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **23,5GB / 13 vCPU**.
 
 - Job thử: PySpark sinh 30 triệu dòng, sắp xếp, ghi Parquet lên HDFS (2,3GB), gom nhóm rồi đọc lại; chạy 68 giây trên cả 3 executor. Không container nào bị OOM kill.
 - Host: RAM thực tế 31.013MB. Lúc rỗi còn `available` 23.190MB; thấp nhất khi chạy job là 16.454MB.
-- Tổng giới hạn 23,5GB chỉ là trần; mức dùng thật lúc rỗi khoảng 3GB, khi chạy job thử khoảng 9GB.
+- Tổng giới hạn (lúc đo là 23,5GB, nay 24,5GB) chỉ là trần; mức dùng thật lúc rỗi khoảng 3GB, khi chạy job thử khoảng 9GB.
 - **Chưa đo:** job có Python UDF hoặc pandas (tiến trình Python nằm ngoài heap 3GB của executor) và collector khi tải dữ liệu thật (Lát 2).
 
 **Số đo Lát 1: streaming chạy song song batch (24/11/2026, dữ liệu mẫu, 3 worker).** Job streaming `intraday_to_raw` (processingTime 10 giây, `spark.cores.max=2`) chạy liên tục; cùng lúc phát lại 11.259 bản tin (5 ngày, 2.000 msg/giây) và gửi hai job `daily_raw_to_clean`, `intraday_raw_to_clean`. `docker stats` lấy mẫu khoảng 6 giây một lần (42 mẫu trong 4 phút, nên có thể lỡ đỉnh ngắn).
@@ -180,6 +180,7 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **23,5GB / 13 vCPU**.
 - Chia core trên master: streaming 2 core (1 executor, worker3); `daily_raw_to_clean` lấy 4 core còn lại (worker1, worker2); `intraday_raw_to_clean` ở trạng thái WAITING khoảng 35 giây cho tới khi job daily xong rồi mới nhận 4 core. Hai job batch không chạy song song với nhau vì job batch không đặt `spark.cores.max`.
 - Host `available` thấp nhất 18.713MB. Không container nào bị OOM kill hay khởi động lại; log worker/master không có executor bị mất.
 - Đánh giá: worker còn dư nhiều (đỉnh < 1GB / 4GB với dữ liệu mẫu). Driver là chỗ chật: mỗi spark-submit là một JVM `-Xmx1400m` trong cùng container 2GB và 1 CPU; ba driver cùng lúc đã lên 1,56GB và dùng hết 1 CPU (batch đầu tiên của streaming mất 23 giây cho 11.259 dòng). Không nên chạy quá 3 driver cùng lúc trong `spark-driver`.
+- **Sau số đo này** container `spark-driver` được nâng lên 3GB / 2 CPU. Các số ở bảng trên đo với giới hạn cũ 2GB / 1 CPU; chưa đo lại 3 driver cùng lúc với giới hạn mới.
 - Latency đầu-cuối của lần phát lại này (commit của batch − `produced_ts`): p50 28,1 giây, p95 30,7 giây; gồm thời gian chờ trigger 10 giây và batch 23 giây khi tranh CPU với hai job batch.
 - Job streaming đặt `spark.cores.max=2` để không chiếm hết executor của job batch.
 - Khi chạy benchmark scale-out và storage thì dừng job streaming.
