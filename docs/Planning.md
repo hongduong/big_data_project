@@ -44,7 +44,7 @@ Thử trên máy Mac, không có tài khoản nào, với các mã FPT, VNM, VCB
 
 ### 0.3 Giá điều chỉnh
 
-Ngày 05/01/2015, FPT: VCI trả 6.489,7 đồng; VNDirect trả `adClose` 6,49 (nghìn đồng) và `close` gốc 47,8. Hai nguồn khớp nhau về giá điều chỉnh. CafeF cho giá điều chỉnh 7,86 ngày 30/12/2015, tức cách điều chỉnh của CafeF khác hai nguồn kia; đây là dữ liệu thật cho kiểm tra đối chiếu chéo.
+Ngày 05/01/2015, FPT: VCI trả 6.489,7 đồng; VNDirect trả `adClose` 6,49 (nghìn đồng) và `close` gốc 47,8. Hai nguồn khớp nhau về giá điều chỉnh. CafeF cho giá điều chỉnh 7,86 ngày 30/12/2015, tức cách điều chỉnh của CafeF khác hai nguồn kia; đây là dữ liệu thật cho kiểm tra đối chiếu chéo. Giá điều chỉnh của VCI được nguồn nhân lại toàn bộ lịch sử khi mã có sự kiện (xử lý ở quyết định 13, mục 8).
 
 ### 0.4 Tốc độ và giới hạn
 
@@ -716,10 +716,24 @@ Nhánh `main` giữ nguyên, không nhận file nào từ bước này.
     - Sau khi ghi `known_source_gaps` (66 ngày của 7 mã trên: gọi lại VCI ngày 28/11/2026, nguồn không có nến) và 51 giai đoạn mới của `known_periods` (26 mã nghi chuyển sàn), chạy lại cùng ngày: cả ba lượt đều ĐẠT. 412 mã: độ đủ 99,90%, mã thấp nhất PJT 98,09%, tỷ lệ ngày thưa 0,06%, khớp khối lượng 99,86%, p95 lệch hiệu dụng 0,12%. 382 mã: độ đủ 99,89%, mã thấp nhất PJT 98,09%. VN30: không đổi. Bộ toàn bộ dữ liệu (`__all_data`) giữ số cũ: độ đủ 99,88%, mã thấp nhất DTT 96,5%. Ngưỡng không đổi.
 12. **Dashboard đọc nến phút không quét bảng (28/11/2026):** trang chủ lấy số dòng và khoảng thời gian nến phút từ footer Parquet (không đọc bảng), số mã đếm trong tháng gần nhất; tab nến phút chỉ đọc thư mục tháng của ngày đang xem, danh sách ngày lấy từ nến ngày.
    - Lý do: giới hạn container 1GB, bảng 26,8 triệu dòng. Số đo trước/sau ở mục 2.2.
+13. **Collector xử lý việc nguồn điều chỉnh lại giá lịch sử (28/11/2026):**
+   - Vấn đề: nến phút và nến ngày của VCI là giá đã điều chỉnh; khi một mã có sự kiện, VCI nhân lại toàn bộ giá lịch sử với một hệ số. Collector chỉ tải lại năm hiện tại nên file các năm trước giữ hệ số cũ, giá lệch qua ranh giới năm. Phát hiện qua FPT: trong 25–27/11/2026 mọi giá lịch sử bị nhân 0,9775 (226/226 nến ngày 23/11 lệch đúng tỷ lệ, khối lượng không đổi), khiến job clean dựng lại cả 11 tháng của 2026.
+   - Cách xử lý (cả hai collector, module dùng chung `src/stocklake/ingestion/price_adjustment.py`): khi tải năm hiện tại, so 4 giá (mở, cao, thấp, đóng) của các nến/phiên trùng với file đang có, dung sai tuyệt đối khoảng 0,02 đồng.
+     - (a) Lệch theo một tỷ lệ chung (>= 99% nến trùng khớp cùng hệ số khác 1; tối thiểu 30 nến phút hoặc 5 phiên ngày): đánh dấu mọi năm của mã chưa xong, tải lại hết trong cùng lượt, ghi hệ số + ngày phát hiện vào state (`<collector>/<MÃ>/_adjustment/<run_id>`).
+     - (b) Nguồn sửa lẻ (tối đa 3 nến hoặc 0,1%): chỉ ghi vào kết quả job.
+     - (c) Lệch không theo một tỷ lệ, hoặc quá ít nến trùng: cảnh báo, ghi state, KHÔNG tự tải lại.
+     - Cờ `--refetch-all-years MÃ,...` để ép tải lại (dùng cho mã mà file năm hiện tại đã mang hệ số mới).
+   - Job nến ngày mặc định 1 request/giây cho mỗi nguồn (trước là 2), như job nến phút.
+   - Kiểm chứng FPT (ép bằng cờ): nến phút 6 request, nến ngày 4 request; ghi lại file 2023, 2024, 2025; số dòng không đổi (nến phút 17.150 / 55.566 / 56.199; nến ngày 249 / 250 / 249); mọi giá đúng bằng 0,9775 lần giá cũ; khối lượng không đổi; file 2026 không bị ghi lại. Giá đóng cửa 31/12/2025: 85.907 → 83.974, so với nến đầu 05/01/2026 là 83.448 (lệch qua ranh giới năm từ 2,9% còn 0,6%). Job clean sau đó dựng lại 28 tháng trong 97 giây.
+   - Đợt chạy 402 mã (412 trừ 10 mã mẫu), tối 28/11/2026, 1 request/giây: nến phút 511 request trong 11 phút, 399 file ghi lại, 16 file không đổi; nến ngày 417 request trong 7 phút; không lỗi, không 429/403. Cả hai collector tự phát hiện cùng 5 mã bị điều chỉnh và tải lại mọi năm của chúng: BVH 0,9858; GDA 0,9091; MSH 0,8844; PDN 0,9871; VPX 0,6897. Không mã nào rơi vào "lệch không theo một tỷ lệ" hay "quá ít nến trùng"; không có trường hợp nguồn sửa lẻ.
+   - Sau đợt này: clean nến phút 26.918.886 dòng (trước 26.840.478), job clean dựng lại cả 39 tháng trong 116 giây (60 phân vùng xáo trộn, bộ nhớ đỉnh worker 3,6–3,7GB trên 4GB); clean nến ngày 380.898 dòng. DQ đạt ở cả ba lượt (412 mã, VN30, 382 mã): độ đủ 99,90% / 100% / 99,89%; mã thấp nhất PJT 98,09%; tỷ lệ ngày thưa 0,06%; khớp khối lượng 99,86%; mỗi lượt DQ 41–52 giây.
 
 ### Việc còn mở và rủi ro (28/11/2026)
 
 - 26 mã ngoài VN30 có dấu hiệu chuyển sàn giống BSR/MCH (nến ngoài giờ HOSE tới một ngày, rồi 5–18 phiên trống, rồi theo mẫu HOSE): GDA, BVB, AFX, VBB, HIO, KLB, VAB, NTC, ANT, PDV, MZG, ECO, GHC, DSC, TAL, TSA, DSH, BMJ, MCM, VVS, VTP, NAB, GEE, TCI, HTG, HNA. Đã ghi vào `dq_notes.yaml` (28/11/2026) như BSR/MCH; suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết; ECO và HNA bằng chứng yếu hơn.
-- Clean `--full` dùng tới 3,6GB trên giới hạn 4GB mỗi worker (mục 5(a)).
+- Clean `--full` dùng tới 3,6GB trên giới hạn 4GB mỗi worker (mục 5(a)); lượt tăng dần dựng lại cả 39 tháng ngày 28/11 đạt đỉnh 3,7GB trên 4GB.
 - File raw nến phút rất nhỏ (trung bình khoảng 360KB, 1.607 file): đầu vào cho phần gộp file.
-- Khi collector ghi lại file năm hiện tại của một mã, job clean dựng lại mọi tháng của năm đó (lượt e2e-sample 28/11 dựng lại 11 tháng của 2026 dù chỉ tháng 11 có nến mới). Nguyên nhân: nến phút VCI là giá ĐÃ ĐIỀU CHỈNH; trong 25–27/11/2026 toàn bộ giá lịch sử của FPT bị nhân 0,9775 (9 mã mẫu khác không đổi), nên mọi nến FPT của 2026 đổi thật. Hệ quả chưa xử lý: collector chỉ ghi lại file năm hiện tại, nên file các năm trước của mã đó còn giá theo hệ số cũ (lệch nhau qua ranh giới năm); nến ngày VCI có cùng rủi ro.
+- ĐÃ XỬ LÝ (quyết định 13): job clean dựng lại mọi tháng của năm khi collector ghi lại file năm hiện tại (lượt e2e-sample 28/11 dựng lại 11 tháng của 2026 dù chỉ tháng 11 có nến mới). Nguyên nhân: nến phút VCI là giá ĐÃ ĐIỀU CHỈNH; trong 25–27/11/2026 toàn bộ giá lịch sử của FPT bị nhân 0,9775 (9 mã mẫu khác không đổi), nên mọi nến FPT của 2026 đổi thật.
+- 4 mã VBB (0,9646), VFG (0,9755), VNL (0,963), SFI (0,96) có giá đóng cửa nến phút cuối ngày lệch một tỷ lệ cố định so với nến ngày ở mọi phiên tới 06/11/2026 (654–772 phiên mỗi mã); các phiên từ đó về sau khớp. Tải lại ngày 28/11 không đổi gì, tức hai bảng của chính nguồn VCI đang ở hai hệ số điều chỉnh khác nhau. Clean daily của nguồn VCI không có `raw_close` (null) nên chưa xác định được bảng nào khớp giá gốc; cần đối chiếu giá gốc của VNDirect. Chưa xử lý.
+- Phép so giá đóng cửa nến phút cuối ngày với nến ngày (chưa thành kiểm tra DQ) trên 300.260 cặp (mã, ngày): 4.382 ngày lệch quá 0,1% (1,46%) thuộc 215 mã, phần lớn ở mã thưa có nến phút cuối sớm hơn 14:45 và dồn vào 9/2023–1/2024. Phép so này không bắt được lệch hệ số qua ranh giới năm khi cả hai bảng cùng cũ (ca FPT).
+- Tự phát hiện điều chỉnh giá chỉ có một cơ hội: nếu lượt phát hiện rơi vào trường hợp (c), file năm hiện tại vẫn được ghi theo hệ số mới và lượt sau không còn thấy lệch; khi đó phải chạy tay với `--refetch-all-years`.
