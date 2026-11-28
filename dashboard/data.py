@@ -6,8 +6,9 @@ Các loader có cache import pandas/pyarrow bên trong hàm.
 
 from __future__ import annotations
 
+import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, TypeVar
 
@@ -17,10 +18,13 @@ try:  # test ngoài container không có streamlit: bỏ cache
     import streamlit as st
 
     _cache = st.cache_data(ttl=60, show_spinner=False)
+    _cache_long = st.cache_data(ttl=300, show_spinner=False)  # quét footer: nặng hơn, đổi chậm
 except ImportError:  # pragma: no cover
 
     def _cache(fn):
         return fn
+
+    _cache_long = _cache
 
 
 VN_TZ = timezone(timedelta(hours=7))  # Asia/Ho_Chi_Minh, không có DST
@@ -29,6 +33,8 @@ INTRADAY_PATH = table_path("clean", "intraday_1m")
 DAILY_COLUMNS = ["symbol", "trade_date", "open", "high", "low", "close", "raw_close", "volume"]
 INTRADAY_COLUMNS = ["symbol", "bar_ts", "open", "high", "low", "close", "volume", "trade_date"]
 RETRY_PAUSE_S = 1.5  # nghỉ trước lần đọc lại khi job clean đang thay file phân vùng
+
+_PART_RE = re.compile(r"year=(\d+)/month=(\d+)(?:/|$)")
 
 T = TypeVar("T")
 
@@ -66,6 +72,43 @@ def intraday_filters(symbol: str, trade_date: date | None = None):
             ("month", "==", trade_date.month),
         ]
     return f
+
+
+def intraday_month_filters(symbol: str, trade_date: date) -> list[tuple[str, str, Any]]:
+    """Lọc khi đọc THẲNG thư mục `year=Y/month=M` (cột year/month không còn trong schema)."""
+    return [("symbol", "==", symbol), ("trade_date", "==", trade_date)]
+
+
+def intraday_month_path(base: str, trade_date: date) -> str:
+    """Thư mục phân vùng hive của tháng chứa `trade_date` (tháng không đệm số 0)."""
+    return f"{base.rstrip('/')}/year={trade_date.year}/month={trade_date.month}"
+
+
+def parse_partition(path: str) -> tuple[int, int] | None:
+    """'.../year=2026/month=11[/file]' -> (2026, 11); không phải phân vùng -> None."""
+    m = _PART_RE.search(path.rstrip("/") + "/")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def latest_partition(paths: Iterable[str]) -> tuple[int, int] | None:
+    """Phân vùng (năm, tháng) mới nhất trong danh sách đường dẫn; None nếu không có."""
+    parts = [p for p in map(parse_partition, paths) if p]
+    return max(parts) if parts else None
+
+
+def merge_footer_stats(stats: Iterable[tuple[int, Any, Any]]) -> tuple[int, Any, Any]:
+    """Gộp (num_rows, min, max) của nhiều file/row group -> (tổng dòng, min nhỏ nhất, max lớn nhất).
+
+    min/max là None (thiếu thống kê) thì bỏ qua; không có giá trị nào -> (rows, None, None).
+    """
+    rows, lo, hi = 0, None, None
+    for n, mn, mx in stats:
+        rows += n
+        if mn is not None and (lo is None or mn < lo):
+            lo = mn
+        if mx is not None and (hi is None or mx > hi):
+            hi = mx
+    return rows, lo, hi
 
 
 def to_vn_time(ts: datetime) -> datetime:
@@ -121,11 +164,11 @@ def retry_once(
     return fn()
 
 
-def summary_line(rows: int, symbols: int, first: Any, last: Any) -> str:
-    """Dòng tóm tắt số dòng / mã / khoảng ngày."""
+def summary_line(rows: int, symbols: int, first: Any, last: Any, symbols_label: str = "mã") -> str:
+    """Dòng tóm tắt số dòng / mã / khoảng ngày (`symbols_label` ghi rõ phạm vi đếm mã)."""
     if not rows:
         return "Không có dữ liệu."
-    return f"{rows:,} dòng · {symbols} mã · từ {first} đến {last}"
+    return f"{rows:,} dòng · {symbols} {symbols_label} · từ {first} đến {last}"
 
 
 # ------------------------------------------------------------ đọc dữ liệu
@@ -195,36 +238,119 @@ def load_daily(symbols=None, start: date | None = None, end: date | None = None)
 
 
 @_cache
-def load_intraday(symbol: str, trade_date: date | None = None):
-    """Nến 1 phút clean của một mã (tuỳ chọn một ngày); thêm cột bar_ts_vn."""
-    table = _read(INTRADAY_PATH, INTRADAY_COLUMNS, intraday_filters(symbol, trade_date))
+def load_intraday(symbol: str, trade_date: date):
+    """Nến 1 phút clean của một mã trong MỘT ngày; thêm cột bar_ts_vn.
+
+    Chỉ đọc thư mục phân vùng của tháng chứa ngày đó (không liệt kê/đọc 38 tháng còn lại).
+    Tháng chưa có thư mục hoặc ngày/mã không có nến phút -> DataFrame rỗng.
+    """
+    path = intraday_month_path(INTRADAY_PATH, trade_date)
+    table = _read(path, INTRADAY_COLUMNS, intraday_month_filters(symbol, trade_date))
     if table is None:
         return _empty([*INTRADAY_COLUMNS, "bar_ts_vn"])
     return _to_pandas(table, INTRADAY_COLUMNS).sort_values("bar_ts").reset_index(drop=True)
 
 
 @_cache
-def list_symbols() -> list[str]:
-    """Các mã có trong nến ngày clean."""
-    table = _read(DAILY_PATH, ["symbol"], None)
+def list_trade_days(symbol: str) -> list[date]:
+    """Các ngày giao dịch của mã trong nến ngày clean, mới nhất trước (rẻ: ~1 nghìn dòng)."""
+    table = _read(DAILY_PATH, ["symbol", "trade_date"], [("symbol", "==", symbol)])
     if table is None:
         return []
-    return sorted(set(table.column("symbol").to_pylist()))
+    return sorted(set(table.column("trade_date").to_pylist()), reverse=True)
 
 
 @_cache
-def table_status(kind: str) -> dict[str, Any]:
-    """Số dòng, số mã, khoảng ngày của clean daily ('daily') hoặc intraday ('intraday')."""
+def list_symbols() -> list[str]:
+    """Các mã có trong nến ngày clean."""
     import pyarrow.compute as pc
 
-    path, col = (DAILY_PATH, "trade_date") if kind == "daily" else (INTRADAY_PATH, "bar_ts")
-    table = _read(path, ["symbol", col], None)
+    table = _read(DAILY_PATH, ["symbol"], None)
     if table is None:
-        return {"rows": 0, "symbols": 0, "first": None, "last": None}
+        return []
+    return sorted(pc.unique(table.column("symbol")).to_pylist())  # chỉ danh sách mã duy nhất
+
+
+def _column_stats(fs, path: str, col: str) -> tuple[int, Any, Any]:
+    """(num_rows, min, max) của cột `col` từ footer một file Parquet; không đọc dữ liệu.
+
+    Thiếu thống kê ở bất kỳ row group nào thì đọc riêng cột đó của file này để lấy min/max.
+    """
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    from stocklake.common.hdfs import read_parquet_files
+
+    with fs.open(path, "rb") as f:
+        md = pq.ParquetFile(f).metadata
+    rg_stats: list[tuple[int, Any, Any]] = []
+    complete = md.num_row_groups > 0
+    for i in range(md.num_row_groups):
+        rg = md.row_group(i)
+        idx = next((j for j in range(rg.num_columns) if rg.column(j).path_in_schema == col), None)
+        st_ = rg.column(idx).statistics if idx is not None else None
+        if st_ is not None and st_.has_min_max:
+            rg_stats.append((0, st_.min, st_.max))
+        else:
+            complete = False
+    if complete or md.num_rows == 0:
+        _, lo, hi = merge_footer_stats(rg_stats)
+        return int(md.num_rows), lo, hi
+    table = read_parquet_files([path], columns=[col])  # dự phòng: một file, một cột
     mm = pc.min_max(table.column(col)).as_py()
+    return int(md.num_rows), mm["min"], mm["max"]
+
+
+def _intraday_status() -> dict[str, Any]:
+    """Số dòng + khoảng thời gian của nến phút từ footer Parquet; số mã theo tháng gần nhất."""
+    import pyarrow.compute as pc
+
+    from stocklake.common.hdfs import ls, read_parquet_files, webhdfs_fs
+
+    fs = webhdfs_fs()
+    base = INTRADAY_PATH
+    empty = {"rows": 0, "symbols": 0, "first": None, "last": None, "symbols_label": "mã"}
+    if not fs.exists(base):
+        return empty
+    files: list[str] = []  # (năm, tháng) lấy từ đường dẫn; bỏ _build_state.json và file tạm
+    for year_dir in (p for p in ls(base, fs) if re.search(r"/year=\d+$", p.rstrip("/"))):
+        for month_dir in (p for p in ls(year_dir, fs) if parse_partition(p)):
+            for f in ls(month_dir, fs):
+                name = f.rstrip("/").rsplit("/", 1)[-1]
+                if name.endswith(".parquet") and not name.startswith(("_", ".")):
+                    files.append(f)
+    if not files:
+        return empty
+    rows, first, last = merge_footer_stats(_column_stats(fs, f, "bar_ts") for f in files)
+    if not rows:
+        return empty
+    ym = latest_partition(files)
+    latest_files = [f for f in files if parse_partition(f) == ym]
+    sym_table = read_parquet_files(latest_files, columns=["symbol"], fs=fs)
+    n_sym = pc.count_distinct(sym_table.column("symbol")).as_py() if sym_table.num_rows else 0
+    label = f"mã trong tháng gần nhất ({ym[0]}-{ym[1]:02d})" if ym else "mã"
+    return {"rows": rows, "symbols": n_sym, "first": first, "last": last, "symbols_label": label}
+
+
+@_cache_long
+def table_status(kind: str) -> dict[str, Any]:
+    """Số dòng, số mã, khoảng ngày của clean daily ('daily') hoặc intraday ('intraday').
+
+    daily: đọc 2 cột (~380 nghìn dòng). intraday: KHÔNG đọc bảng; số dòng/khoảng thời gian lấy
+    từ footer Parquet, số mã chỉ đếm trong tháng gần nhất (khoá `symbols_label` ghi rõ).
+    """
+    if kind == "intraday":
+        return retry_once(_intraday_status, retry_on=_retryable_errors())
+    import pyarrow.compute as pc
+
+    table = _read(DAILY_PATH, ["symbol", "trade_date"], None)
+    if table is None:
+        return {"rows": 0, "symbols": 0, "first": None, "last": None, "symbols_label": "mã"}
+    mm = pc.min_max(table.column("trade_date")).as_py()
     return {
         "rows": table.num_rows,
-        "symbols": len(set(table.column("symbol").to_pylist())),
+        "symbols": pc.count_distinct(table.column("symbol")).as_py(),
         "first": mm["min"],
         "last": mm["max"],
+        "symbols_label": "mã",
     }

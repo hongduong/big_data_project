@@ -129,3 +129,60 @@ def test_dashboard_imports_only_contracts_and_common():
                 assert n.split(".")[0] != "pyspark", f"{path}: {n}"
                 if n.split(".")[0] == "stocklake":
                     assert n.startswith(allowed), f"{path}: {n}"
+
+
+def test_intraday_month_helpers(d):
+    day = date(2026, 3, 5)
+    assert d.intraday_month_path("/data/clean/intraday_1m/", day) == (
+        "/data/clean/intraday_1m/year=2026/month=3"
+    )
+    # đọc thẳng thư mục tháng: không được lọc theo year/month (không có trong schema)
+    assert d.intraday_month_filters("VNM", day) == [
+        ("symbol", "==", "VNM"),
+        ("trade_date", "==", day),
+    ]
+
+
+def test_parse_and_latest_partition(d):
+    assert d.parse_partition("/data/x/year=2026/month=11/part-0.parquet") == (2026, 11)
+    assert d.parse_partition("/data/x/year=2025/month=9") == (2025, 9)
+    assert d.parse_partition("/data/x/_build_state.json") is None
+    paths = [
+        "/t/year=2025/month=12/a.parquet",
+        "/t/year=2026/month=2/a.parquet",
+        "/t/year=2026/month=10/a.parquet",
+        "/t/_build_state.json",
+    ]
+    assert d.latest_partition(paths) == (2026, 10)  # so sánh số, không so chuỗi
+    assert d.latest_partition(["/t/_build_state.json"]) is None
+
+
+def test_merge_footer_stats(d):
+    t = datetime
+    got = d.merge_footer_stats(
+        [(10, t(2026, 1, 5), t(2026, 1, 9)), (5, None, None), (7, t(2025, 12, 1), t(2026, 1, 2))]
+    )
+    assert got == (22, t(2025, 12, 1), t(2026, 1, 9))
+    assert d.merge_footer_stats([]) == (0, None, None)
+
+
+def test_summary_line_label(d):
+    s = d.summary_line(5, 3, "a", "b", "mã trong tháng gần nhất (2026-11)")
+    assert "3 mã trong tháng gần nhất (2026-11)" in s
+
+
+def test_column_stats_footer_only(d, tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    pytest.importorskip("fsspec")
+    pytest.importorskip("stocklake.common.hdfs")
+    import fsspec
+
+    t1 = pa.table({"bar_ts": [datetime(2026, 1, 5), datetime(2026, 1, 6)], "symbol": ["A", "A"]})
+    t2 = pa.table({"bar_ts": [datetime(2026, 1, 2)], "symbol": ["B"]})
+    path = tmp_path / "f.parquet"
+    with pq.ParquetWriter(str(path), t1.schema, write_statistics=True) as w:
+        w.write_table(t1)
+        w.write_table(t2)
+    rows, lo, hi = d._column_stats(fsspec.filesystem("file"), str(path), "bar_ts")
+    assert (rows, lo, hi) == (3, datetime(2026, 1, 2), datetime(2026, 1, 6))

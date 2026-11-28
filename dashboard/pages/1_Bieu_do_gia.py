@@ -157,29 +157,40 @@ with tab_candle:
 with tab_intraday:
     sym_i = st.selectbox("Mã", symbols, key="intra_sym")
     try:
-        di = data.load_intraday(sym_i)
+        days = data.list_trade_days(sym_i)  # từ nến ngày clean, mới nhất trước
     except Exception as exc:
-        st.error(f"Không đọc được nến phút: {exc}")
-        di = None
-    if di is not None:
-        if di.empty:
-            st.info("Chưa có dữ liệu nến phút clean (/data/clean/intraday_1m) cho mã này.")
+        st.error(f"Không đọc được danh sách ngày giao dịch: {exc}")
+        days = None
+    if days is not None:
+        if not days:
+            st.info("Mã này chưa có nến ngày clean nên chưa có ngày để xem nến phút.")
         else:
-            days = sorted(di["trade_date"].dt.date.unique(), reverse=True)
-            day = st.selectbox("Ngày giao dịch", days, key="intra_day")
-            dd = di[di["trade_date"].dt.date == day]
-            st.line_chart(
-                dd.set_index("bar_ts_vn")["close"],
-                y_label="Giá đóng cửa 1 phút (VND)",
-                x_label="Giờ Việt Nam",
-            )
-            st.caption(
-                f"{len(dd):,} nến phút trong ngày {day}; "
-                f"{dd['bar_ts_vn'].min():%H:%M} - {dd['bar_ts_vn'].max():%H:%M} (giờ Việt Nam)."
-            )
-            show_summary(di, "bar_ts_vn")
-            st.dataframe(
-                dd.tail(10).sort_values("bar_ts", ascending=False),
-                hide_index=True,
-                width="stretch",
-            )
+            day = st.selectbox("Ngày giao dịch", days, index=0, key="intra_day")
+            try:
+                dd = data.load_intraday(sym_i, day)  # chỉ đọc phân vùng tháng của `day`
+            except Exception as exc:
+                st.error(f"Không đọc được nến phút: {exc}")
+                dd = None
+            if dd is not None:
+                if dd.empty:
+                    st.info(
+                        f"Không có nến phút của {sym_i} ngày {day} "
+                        "(/data/clean/intraday_1m chưa có dữ liệu cho ngày này)."
+                    )
+                else:
+                    st.line_chart(
+                        dd.set_index("bar_ts_vn")["close"],
+                        y_label="Giá đóng cửa 1 phút (VND)",
+                        x_label="Giờ Việt Nam",
+                    )
+                    st.caption(
+                        f"{len(dd):,} nến phút của {sym_i} trong ngày {day} "
+                        "(chỉ nạp ngày này); "
+                        f"{dd['bar_ts_vn'].min():%H:%M} - {dd['bar_ts_vn'].max():%H:%M} "
+                        "(giờ Việt Nam)."
+                    )
+                    st.dataframe(
+                        dd.tail(10).sort_values("bar_ts", ascending=False),
+                        hide_index=True,
+                        width="stretch",
+                    )

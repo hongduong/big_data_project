@@ -36,7 +36,10 @@ for _kind, _label in (("daily", "Nến ngày clean"), ("intraday", "Nến phút 
     _first, _last = _s["first"], _s["last"]
     if _kind == "intraday":  # bar_ts là UTC -> giờ Việt Nam
         _first, _last = to_vn_time(_first), to_vn_time(_last)
-    st.write(f"**{_label}**: " + summary_line(_s["rows"], _s["symbols"], _first, _last))
+    st.write(
+        f"**{_label}**: "
+        + summary_line(_s["rows"], _s["symbols"], _first, _last, _s.get("symbols_label", "mã"))
+    )
 
 st.header("Kiểm tra HDFS")
 if st.button("Kiểm tra HDFS"):
