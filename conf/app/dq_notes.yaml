@@ -1,11 +1,16 @@
 # Ghi chú riêng cho DQ nến phút (stocklake.dq.notes, đọc qua load_app_conf("dq_notes")).
 # Đây là DỮ LIỆU: không lọc gì ở raw/clean. Báo cáo DQ dùng để:
 #   - tính thêm khối `excluding_known_periods` (bỏ các giai đoạn dưới đây, gồm cả ngày trống);
+#   - bỏ các ngày bất thường có `exclude_from` khỏi bộ số kết luận của kiểm tra cứng tương ứng
+#     (bộ số toàn bộ dữ liệu vẫn ghi ở `reference_all_data` / `<check>__all_data`);
 #   - gắn `note` vào các dòng xấu nhất rơi vào giai đoạn / ngày đã biết.
 # Định dạng:
 #   known_periods:   symbol (viết hoa), start/end (YYYY-MM-DD, start null = từ đầu dữ liệu),
 #                    label, note
-#   known_anomalies: date (YYYY-MM-DD), symbols (rỗng = toàn thị trường), label, note, status
+#   known_anomalies: date (YYYY-MM-DD), symbols (rỗng = toàn thị trường), label, note, status,
+#                    exclude_from (tuỳ chọn, mặc định rỗng = không loại khỏi kiểm tra nào;
+#                    giá trị hợp lệ: volume_minute_gt_daily — loại khỏi kiểm tra cứng
+#                    intraday_volume_days_minute_gt_daily)
 
 known_periods:
   # BSR: kiểm trên clean/intraday_1m ngày 24/11/2026 — nến ngoài mẫu HOSE (trước 09:15,
@@ -52,3 +57,47 @@ known_anomalies:
       Volume phút thấp hơn volume ngày trên toàn thị trường (trung vị khoảng -0,5% trên 28 mã;
       VHM -4,1%, HDB -3,9%) dù số nến/ngày đủ.
     status: chưa giải thích; không điều tra thêm (quyết định 24/11/2026)
+  # Ngày nguồn có nến phút thừa (đo 28/11/2026): 47 (mã, ngày) có volume phút > volume ngày, dồn
+  # hết vào 5 ngày dưới đây. Đã kiểm 6 ca: gọi lại nguồn VCI vẫn trả đúng các nến đang lưu, còn
+  # nến ngày của VCI và VNDirect khớp nhau ở con số thấp hơn. Áp cho toàn thị trường trong ngày.
+  - date: 2025-05-06
+    symbols: []
+    label: nen_phut_thua_nguon_2025_05_06
+    note: >-
+      Nguồn có nến phút thừa: 21 mã có volume phút > volume ngày. Chưa rõ nguyên nhân phía
+      nguồn. Dữ liệu giữ nguyên ở raw và clean.
+    status: loại khỏi kiểm tra cứng volume phút > ngày (quyết định 28/11/2026)
+    exclude_from: [volume_minute_gt_daily]
+  - date: 2025-05-26
+    symbols: []
+    label: nen_phut_thua_nguon_2025_05_26
+    note: >-
+      Nguồn có nến phút thừa: 7 mã có volume phút > volume ngày. Chưa rõ nguyên nhân phía
+      nguồn. Dữ liệu giữ nguyên ở raw và clean.
+    status: loại khỏi kiểm tra cứng volume phút > ngày (quyết định 28/11/2026)
+    exclude_from: [volume_minute_gt_daily]
+  - date: 2025-11-20
+    symbols: []
+    label: nen_phut_thua_nguon_2025_11_20
+    note: >-
+      Nguồn có nến phút thừa: 13 mã có volume phút > volume ngày. Chưa rõ nguyên nhân phía
+      nguồn. Dữ liệu giữ nguyên ở raw và clean.
+    status: loại khỏi kiểm tra cứng volume phút > ngày (quyết định 28/11/2026)
+    exclude_from: [volume_minute_gt_daily]
+  - date: 2026-03-16
+    symbols: []
+    label: nen_phut_thua_nguon_2026_03_16
+    note: >-
+      Nguồn có nến phút thừa: 5 mã có volume phút > volume ngày. Chưa rõ nguyên nhân phía
+      nguồn. Dữ liệu giữ nguyên ở raw và clean.
+    status: loại khỏi kiểm tra cứng volume phút > ngày (quyết định 28/11/2026)
+    exclude_from: [volume_minute_gt_daily]
+  - date: 2026-11-23
+    symbols: []
+    label: nen_phut_thua_nguon_2026_11_23
+    note: >-
+      Nguồn có nến phút thừa: 1 mã có volume phút > volume ngày (THG: 8 nến cộng 3.700 cổ
+      phiếu, nến ngày 3.500 ở cả VCI và VNDirect). Chưa rõ nguyên nhân phía nguồn. Dữ liệu giữ
+      nguyên ở raw và clean.
+    status: loại khỏi kiểm tra cứng volume phút > ngày (quyết định 28/11/2026)
+    exclude_from: [volume_minute_gt_daily]
