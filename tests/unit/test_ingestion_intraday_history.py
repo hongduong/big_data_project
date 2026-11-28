@@ -88,12 +88,9 @@ class FakeReader:
         self.store = dict(store or {})
         self.calls = []
 
-    def read_existing(self, path, min_row_groups):
-        self.calls.append((path, min_row_groups))
-        if path not in self.store:
-            return None
-        n_groups, rows = self.store[path]
-        return None if n_groups < min_row_groups else rows
+    def read_rows(self, path):
+        self.calls.append(path)
+        return self.store.get(path)
 
     @classmethod
     def after(cls, writer, groups_override=None):
@@ -348,14 +345,14 @@ def test_single_row_group_file_is_upgraded_even_if_identical(tmp_path):
     rows = w1.by_path[P26]
     reader = FakeReader({P26: (1, rows)})  # file cũ: 1 row group, dữ liệu y hệt
     out, w = rerun(tmp_path, {"FPT": bars}, reader)
-    assert reader.calls == [(P26, 2)]
+    assert reader.calls == [P26]  # đọc một lần (so giá + quyết định ghi)
     assert out["files_written"] == 1 and out["files_unchanged"] == 0
     assert len(w.groups_by_path[P26]) == 2
 
 
 def test_reader_error_falls_back_to_rewrite(tmp_path):
     class Bad:
-        def read_existing(self, path, n):
+        def read_rows(self, path):
             raise OSError("hdfs lỗi")
 
     out, w = rerun(tmp_path, {"FPT": mins("FPT", T26, 3)}, Bad())

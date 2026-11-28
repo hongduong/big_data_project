@@ -41,6 +41,14 @@ class JsonFileStateStore:
     def get(self, collector: str, key: str) -> dict[str, Any] | None:
         return self._data.get(collector, {}).get(key)
 
+    def entries(self, collector: str, prefix: str = "") -> dict[str, dict[str, Any]]:
+        """Bản sao các mục của `collector` có khoá bắt đầu bằng `prefix` (để đọc lịch sử)."""
+        with self._lock:
+            items = self._data.get(collector, {}).items()
+            return {
+                k: json.loads(json.dumps(v, default=str)) for k, v in items if k.startswith(prefix)
+            }
+
     def mark_done(self, collector: str, key: str, meta: Mapping[str, Any] | None = None) -> None:
         self._set(collector, key, {"status": "done", "meta": dict(meta or {})})
 

@@ -20,6 +20,18 @@ lại `StateStore`/`JsonFileStateStore` và cách đặt khoá `intraday_history
 - Lấy từ "bây giờ" lùi tới 1/1 của năm sớm nhất còn cần (năm của `since`, hoặc năm hiện tại). Chỉ
   ghi file khi lượt lấy phủ TRỌN khoảng đó; lỗi/bị chặn giữa chừng thì không ghi gì, không đổi
   trạng thái của mã đó.
+
+Nguồn điều chỉnh giá (VCI nhân lại TOÀN BỘ giá lịch sử của mã với một hệ số khi có sự kiện):
+- Trước khi ghi năm hiện tại, so giá các nến trùng bar_ts với file đang có
+  (`stocklake.ingestion.price_adjustment.compare_prices`).
+- Lệch theo MỘT tỷ lệ chung -> trong cùng lượt: đánh dấu mọi năm qua của mã là chưa xong (state
+  `failed`, lỗi `pending_refetch: ...`), lấy thêm phần lịch sử còn thiếu tới 1/1 năm của `since`
+  rồi ghi lại mọi file năm; sự kiện lưu ở khoá `intraday_history/<SYM>/_adjustment/<run_id>`
+  (mỗi lượt một khoá, giữ lịch sử). Bị chặn/lỗi giữa chừng: không ghi gì, các năm vẫn chưa xong
+  nên lượt sau tự làm tiếp (và file năm hiện tại chưa đổi nên vẫn phát hiện lại được).
+- Lệch không theo một tỷ lệ chung -> chỉ cảnh báo (WARNING + state + JSON), không tải lại năm cũ.
+- `refetch_all_years` (cờ `--refetch-all-years`): ép tải lại mọi năm cho các mã chỉ định, cho ca
+  file năm hiện tại đã mang hệ số mới còn năm trước vẫn cũ (so sánh không còn thấy lệch).
 """
 
 from __future__ import annotations
@@ -30,7 +42,7 @@ import time as _time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Protocol
 
@@ -39,6 +51,13 @@ from stocklake.common.logging import get_logger
 from stocklake.contracts import available_at, get_schema, table_path, to_arrow
 from stocklake.contracts.available_at import VN_TZ
 from stocklake.ingestion.framework import StateStore, WorkUnit
+from stocklake.ingestion.price_adjustment import (
+    IRREGULAR,
+    MINOR,
+    SCALED,
+    compare_prices,
+    event_key,
+)
 from stocklake.sources.base import MinuteBar
 
 log = get_logger(__name__)
@@ -50,6 +69,7 @@ STATE_FILE = "ingestion_state.json"
 DEFAULT_SINCE = date(2023, 9, 11)  # nến phút sớm nhất VCI có
 BLOCKED_KEY = f"{NAME}/_blocked"
 BAR_SECONDS = 60
+MIN_OVERLAP_BARS = 30  # số nến phút trùng tối thiểu để kết luận "lệch theo một tỷ lệ chung"
 
 # Phiên giao dịch giờ VN (thứ 2-6): [bắt đầu, kết thúc)
 TRADING_SESSIONS = ((time(9, 0), time(11, 30)), (time(13, 0), time(15, 0)))
@@ -65,9 +85,8 @@ class ParquetWriter(Protocol):
 
 
 class HistoryReader(Protocol):
-    def read_existing(self, path: str, min_row_groups: int) -> list[dict[str, Any]] | None:
-        """Các dòng (cột COMPARE_COLUMNS) của file hiện có; None nếu chưa có hoặc có ít hơn
-        `min_row_groups` row group (= cần ghi lại)."""
+    def read_rows(self, path: str) -> tuple[int, list[dict[str, Any]]] | None:
+        """(số row group, các dòng cột COMPARE_COLUMNS) của file hiện có; None nếu chưa có."""
         ...
 
 
@@ -89,14 +108,19 @@ class HdfsHistoryReader:
     def __init__(self, fs: Any = None):
         self.fs = fs
 
-    def read_existing(self, path: str, min_row_groups: int) -> list[dict[str, Any]] | None:
+    def read_rows(self, path: str) -> tuple[int, list[dict[str, Any]]] | None:
         from stocklake.common.hdfs import parquet_file_info, read_parquet_files
 
         info = parquet_file_info(path, fs=self.fs)
-        if info is None or info["num_row_groups"] < min_row_groups:
+        if info is None:
             return None
         t = read_parquet_files([path], columns=list(COMPARE_COLUMNS), fs=self.fs)
-        return t.to_pylist() if t.num_rows else []
+        return info["num_row_groups"], (t.to_pylist() if t.num_rows else [])
+
+    def read_existing(self, path: str, min_row_groups: int) -> list[dict[str, Any]] | None:
+        """Giữ tương thích: dòng của file nếu có ít nhất `min_row_groups` row group."""
+        got = self.read_rows(path)
+        return None if got is None or got[0] < min_row_groups else got[1]
 
 
 # ----------------------------------------------------------------- hàm thuần
@@ -160,6 +184,23 @@ def _utc(ts: datetime) -> datetime:
 
 def _compare_key(r: Mapping[str, Any]) -> tuple:
     return (_utc(r["bar_ts"]),) + tuple(r[c] for c in COMPARE_COLUMNS[1:])
+
+
+def _ts_key(r: Mapping[str, Any]) -> datetime:
+    return _utc(r["bar_ts"])
+
+
+def bar_prices(b: MinuteBar) -> dict[str, Any]:
+    """Nến -> dict giá/khối lượng để so với file đang có."""
+    return {"bar_ts": b.bar_ts, "open": b.open, "high": b.high, "low": b.low,
+            "close": b.close, "volume": b.volume}  # fmt: skip
+
+
+def compare_with_existing(existing: Sequence[Mapping[str, Any]], bars: Sequence[MinuteBar]):
+    """Phân loại khác biệt giá giữa file năm hiện tại và nến mới (xem price_adjustment)."""
+    return compare_prices(
+        existing, [bar_prices(b) for b in bars], _ts_key, min_overlap=MIN_OVERLAP_BARS
+    )
 
 
 def bars_identical(
@@ -273,6 +314,17 @@ class _Stats:
     dups: int = 0
     blocked: dict[str, Any] | None = None
     stopped_reason: str | None = None
+    adjustments: list[dict[str, Any]] = field(default_factory=list)
+    mismatches: list[dict[str, Any]] = field(default_factory=list)
+    minor: list[dict[str, Any]] = field(default_factory=list)
+    forced: list[dict[str, Any]] = field(default_factory=list)
+
+
+class _TradingHoursStop(Exception):
+    """Vào giờ giao dịch ngay trước khi tải thêm lịch sử: dừng lượt, phần còn lại để lượt sau."""
+
+
+_READ_FAILED = object()
 
 
 class IntradayHistoryCollector:
@@ -291,6 +343,7 @@ class IntradayHistoryCollector:
         to_table: Callable[[list[dict[str, Any]]], Any] | None = None,
         base: str | None = None,
         reader: HistoryReader | None = None,
+        refetch_all_years: Sequence[str] = (),
     ):
         self.client = client
         self.state = state
@@ -304,30 +357,115 @@ class IntradayHistoryCollector:
         self.base = base
         self.reader = reader or HdfsHistoryReader()
         self.per_year_rows: dict[str, int] = defaultdict(int)
+        self.refetch_all = {s.strip().upper() for s in refetch_all_years if s.strip()}
+        self._cache: dict[str, Any] = {}
 
-    def plan(self, symbol: str, now: datetime) -> list[WorkUnit]:
-        """Các (mã, năm) còn phải làm của một mã (rỗng = bỏ qua mã)."""
+    def plan(self, symbol: str, now: datetime, force: bool = False) -> list[WorkUnit]:
+        """Các (mã, năm) còn phải làm của một mã (rỗng = bỏ qua mã); `force`: mọi năm."""
         cur = vn_year(now)
+        years = (
+            list(range(self.since.year, cur + 1))
+            if force
+            else years_needed(symbol, self.since.year, cur, self.state)
+        )
         return [
             WorkUnit(
                 state_key(symbol, y, y == cur), {"symbol": symbol, "year": y, "live": y == cur}
             )
-            for y in years_needed(symbol, self.since.year, cur, self.state)
+            for y in years
         ]
 
     def _fetch(self, symbol: str, earliest_year: int, now: datetime, st: _Stats) -> list[MinuteBar]:
         """Lùi từ `now` tới 1/1 năm sớm nhất; ném lỗi nếu chưa phủ trọn (không trả dở dang)."""
-        end = now.replace(microsecond=0)
+        return self._fetch_range(symbol, fetch_start(earliest_year), now.replace(microsecond=0), st)
+
+    def _fetch_range(
+        self, symbol: str, start: datetime, end: datetime, st: _Stats
+    ) -> list[MinuteBar]:
         bars: list[MinuteBar] = []
-        for page in self.client.minute_pages(symbol, fetch_start(earliest_year), end):
+        for page in self.client.minute_pages(symbol, start, end):
             st.requests += 1
             bars.extend(page.bars)
         return bars
 
+    def _mark_pending(self, symbol: str, years: Iterable[int], reason: str, run_id: str) -> None:
+        """Đánh dấu các năm qua là chưa xong: bị chặn giữa chừng thì lượt sau làm tiếp."""
+        for y in years:
+            self.state.mark_failed(
+                NAME, state_key(symbol, y), f"pending_refetch: {reason}", {"run_id": run_id}
+            )
+
+    def _check_adjustment(
+        self, symbol: str, units: list[WorkUnit], bars: list[MinuteBar], now: datetime,
+        run_id: str, st: _Stats,
+    ) -> tuple[list[WorkUnit], list[MinuteBar], dict[str, Any] | None]:  # fmt: skip
+        """So năm hiện tại với file đang có; lệch theo một tỷ lệ chung -> lấy thêm mọi năm.
+
+        Trả (đơn vị cần ghi, nến, sự kiện điều chỉnh | None).
+        """
+        cur = vn_year(now)
+        cur_bars = [b for b in bars if vn_year(b.bar_ts) == cur]
+        existing = self._read(file_path(symbol, cur, self.base)) if cur_bars else None
+        if not existing or not existing[1]:
+            return units, bars, None
+        cmp = compare_with_existing(existing[1], cur_bars)
+        at = now.astimezone(timezone.utc).isoformat()
+        info = {"symbol": symbol, "year": cur, **cmp.to_dict()}
+        if cmp.kind == MINOR:
+            log.info(
+                "%s: %s nguồn sửa %d/%d nến năm %d", NAME, symbol, cmp.changed, cmp.overlap, cur
+            )
+            st.minor.append(info)
+            return units, bars, None
+        if cmp.kind == IRREGULAR:
+            log.warning(
+                "%s: %s năm %d lệch giá KHÔNG theo một tỷ lệ chung (%s): %d/%d nến lệch, "
+                "hệ số ước lượng %s; KHÔNG tự tải lại năm cũ, xem ví dụ trong state/kết quả",
+                NAME, symbol, cur, cmp.reason, cmp.changed, cmp.overlap, info["factor"],
+            )  # fmt: skip
+            st.mismatches.append(info)
+            self.state.mark_failed(
+                NAME, event_key(NAME, symbol, run_id), f"price_mismatch: {cmp.reason}",
+                {**info, "detected_at": at, "detected_date": str(now.astimezone(VN_TZ).date()),
+                 "run_id": run_id},
+            )  # fmt: skip
+            return units, bars, None
+        if cmp.kind != SCALED:
+            return units, bars, None
+        past = list(range(self.since.year, cur))
+        event = {
+            **info, "detected_at": at, "detected_date": str(now.astimezone(VN_TZ).date()),
+            "run_id": run_id, "years_marked": past, "years_rewritten": [],
+            "files_rewritten": 0, "refetch": "pending",
+        }  # fmt: skip
+        log.warning(
+            "%s: %s nguồn điều chỉnh giá theo hệ số %s (%d/%d nến khớp); tải lại mọi năm %s",
+            NAME, symbol, info["factor"], cmp.matched, cmp.overlap, past + [cur],
+        )  # fmt: skip
+        self._mark_pending(symbol, past, f"price adjustment x{info['factor']}", run_id)
+        self.state.mark_failed(NAME, event_key(NAME, symbol, run_id), "refetch pending", event)
+        st.adjustments.append(event)
+        earliest = units[0].params["year"]
+        if earliest > self.since.year:
+            if not self.allow_trading_hours and in_trading_hours(self.clock()):
+                raise _TradingHoursStop
+            extra = self._fetch_range(
+                symbol, fetch_start(self.since.year), fetch_start(earliest), st
+            )
+            bars, dups = dedup_bars([*bars, *extra])
+            st.dups += dups
+        return self.plan(symbol, now), bars, event
+
+    def _finish_event(self, event: dict[str, Any], written: list[int]) -> None:
+        event.update(years_rewritten=written, files_rewritten=len(written), refetch="done")
+        self.state.mark_done(NAME, event_key(NAME, event["symbol"], event["run_id"]), event)
+
     def _write_symbol(
         self, symbol: str, units: list[WorkUnit], bars: list[MinuteBar], now: datetime,
         run_id: str, st: _Stats,
-    ) -> None:  # fmt: skip
+    ) -> list[int]:  # fmt: skip
+        """Ghi từng năm; trả các năm đã ghi file (không tính file không đổi)."""
+        written: list[int] = []
         by_year = split_by_year(bars)
         for u in units:
             year = u.params["year"]
@@ -341,6 +479,7 @@ class IntradayHistoryCollector:
                     st.unchanged += 1
                 else:
                     self.writer.write_groups([self.to_table(g) for g in groups], path)
+                    written.append(year)
                     st.files += 1
                     st.rows += n
                     self.per_year_rows[str(year)] += n
@@ -348,17 +487,28 @@ class IntradayHistoryCollector:
                 log.warning("%s: %s rỗng cho năm hiện tại", NAME, symbol)
             # năm trước ngày lịch sử bắt đầu: xong, 0 dòng, không ghi file rỗng
             self.state.mark_done(NAME, u.key, {"source": SOURCE, "records": n})
+        return written
+
+    def _read(self, path: str) -> tuple[int, list[dict[str, Any]]] | None:
+        """Đọc file đang có (nhớ trong lượt của mã); lỗi đọc -> None, kèm log."""
+        if path not in self._cache:
+            try:
+                self._cache[path] = self.reader.read_rows(path)
+            except Exception as exc:  # noqa: BLE001 - không đọc được thì cứ ghi lại
+                log.warning(
+                    "%s: không đọc được %s (%s: %s), sẽ ghi lại",
+                    NAME, path, type(exc).__name__, exc,
+                )  # fmt: skip
+                self._cache[path] = _READ_FAILED
+        got = self._cache[path]
+        return None if got is _READ_FAILED else got
 
     def _unchanged(self, path: str, rows: list[dict[str, Any]], n_months: int) -> bool:
         """File đã có, đã chia row group theo tháng và nến y hệt -> khỏi ghi lại."""
-        try:
-            existing = self.reader.read_existing(path, n_months)
-        except Exception as exc:  # noqa: BLE001 - không đọc được thì cứ ghi lại
-            log.warning(
-                "%s: không đọc được %s (%s: %s), sẽ ghi lại", NAME, path, type(exc).__name__, exc
-            )
-            return False
-        return existing is not None and bars_identical(existing, rows)
+        existing = self._read(path)
+        return (
+            existing is not None and existing[0] >= n_months and bars_identical(existing[1], rows)
+        )
 
     def _record_blocked(self, symbol: str, exc: SourceBlockedError, now: datetime) -> dict:
         info = {
@@ -385,7 +535,8 @@ class IntradayHistoryCollector:
             if not self.allow_trading_hours and in_trading_hours(now):
                 st.stopped_reason = "trading_hours"
                 break
-            units = self.plan(sym, now)
+            force = sym in self.refetch_all
+            units = self.plan(sym, now, force)
             if not units:
                 st.skipped.append(sym)
                 continue
@@ -393,11 +544,25 @@ class IntradayHistoryCollector:
                 st.stopped_reason = "max_symbols"
                 break
             attempted += 1
+            self._cache = {}
             try:
+                if force:
+                    past = [u.params["year"] for u in units if not u.params["live"]]
+                    self._mark_pending(sym, past, "forced (--refetch-all-years)", run_id)
                 bars = self._fetch(sym, units[0].params["year"], now, st)
                 bars, dups = dedup_bars(completed_bars(bars, now))
                 st.dups += dups
-                self._write_symbol(sym, units, bars, now, run_id, st)
+                units, bars, event = self._check_adjustment(sym, units, bars, now, run_id, st)
+                written = self._write_symbol(sym, units, bars, now, run_id, st)
+                if event is not None:
+                    self._finish_event(event, written)
+                if force:
+                    years = [u.params["year"] for u in units]
+                    st.forced.append({"symbol": sym, "years": years, "files_written": len(written)})
+            except _TradingHoursStop:
+                st.stopped_reason = "trading_hours"
+                log.error("%s: %s vào giờ giao dịch trước khi tải lại lịch sử, dừng", NAME, sym)
+                break
             except SourceBlockedError as exc:
                 st.blocked = self._record_blocked(sym, exc, now)
                 st.stopped_reason = "blocked"
@@ -412,6 +577,7 @@ class IntradayHistoryCollector:
                 continue
             finally:
                 bars = None  # nhả bộ nhớ của mã này trước mã kế
+                self._cache = {}
             st.done.append(sym)
         return self._summary(run_id, st, t0)
 
@@ -429,6 +595,27 @@ class IntradayHistoryCollector:
             "per_year_rows": dict(sorted(self.per_year_rows.items())),
             "blocked": st.blocked,
             "stopped_reason": st.stopped_reason,
+            "price_adjustments": [
+                {
+                    k: a[k]
+                    for k in (
+                        "symbol",
+                        "factor",
+                        "detected_at",
+                        "overlap",
+                        "matched",
+                        "changed",
+                        "years_marked",
+                        "years_rewritten",
+                        "files_rewritten",
+                        "refetch",
+                    )
+                }
+                for a in st.adjustments
+            ],  # fmt: skip
+            "price_mismatches": st.mismatches,
+            "price_revisions_minor": st.minor,
+            "forced_refetch": st.forced,
             "seconds": round((self.clock() - t0).total_seconds(), 3),
         }
 
@@ -455,10 +642,12 @@ def run_intraday_history(
     to_table: Callable[[list[dict[str, Any]]], Any] | None = None,
     base: str | None = None,
     reader: HistoryReader | None = None,
+    refetch_all_years: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Chạy collector với cấu hình mặc định; tham số keyword chỉ dùng để thay trong test.
 
-    Thứ tự chọn mã: `symbols` > `group` (vn30|sample) > lỗi.
+    Thứ tự chọn mã: `symbols` > `group` (vn30|sample) > lỗi. `refetch_all_years`: mã phải tải
+    lại mọi năm (từ `since`) dù năm cũ đã xong; mã không nằm trong danh sách chạy thì bỏ qua.
     """
     from stocklake.ingestion.framework import JsonFileStateStore
 
@@ -470,6 +659,11 @@ def run_intraday_history(
         syms = load_symbols(load_app_conf("symbols", settings), group)
     else:
         raise ValueError("Cần symbols hoặc group (vn30 | sample)")
+    missing = sorted({s.strip().upper() for s in refetch_all_years} - set(syms) - {""})
+    if missing:
+        log.warning(
+            "%s: --refetch-all-years bỏ qua mã không nằm trong lượt chạy: %s", NAME, missing
+        )
     if client is None:
         from stocklake.sources.vci import VciClient
 
@@ -486,9 +680,14 @@ def run_intraday_history(
         to_table,
         base,
         reader,
+        refetch_all_years,
     )
     out = col.run()
-    log.info("%s: %s", NAME, {k: v for k, v in out.items() if not k.startswith("symbols_")})
+    log.info(
+        "%s: %s",
+        NAME,
+        {k: v for k, v in out.items() if not k.startswith(("symbols_", "price_mismatches"))},
+    )
     return out
 
 
