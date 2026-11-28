@@ -43,6 +43,16 @@ class FakeSource(SourceClient):
         return [b for b in self.data.get((symbol, start.year), []) if start <= b.trade_date <= end]
 
 
+class NoFiles:
+    """Reader giả: không có file nào trên HDFS (không so giá)."""
+
+    def read_rows(self, path):
+        return None
+
+    def existing_years(self, symbol, base=None):
+        return set()
+
+
 class FakeWriter:
     def __init__(self):
         self.writes = []  # (path, rows)
@@ -275,6 +285,7 @@ def test_run_daily_ohlcv_with_injected(tmp_path, monkeypatch):
     res = run_daily_ohlcv(
         ["FPT"], start=date(2026, 1, 1), end=date(2026, 11, 24), writer=w,
         sources=[FakeSource("vci", vci_data())], state=JsonFileStateStore(tmp_path / "s.json"),
+        reader=NoFiles(),
     )  # fmt: skip
     assert len(res.done) == 1 and len(w.writes) == 1
 
@@ -283,7 +294,7 @@ def test_summary_dict(tmp_path):
     out = run_daily_ohlcv_summary(
         ["FPT"], start=date(2026, 1, 1), end=date(2026, 11, 24), writer=FakeWriter(),
         sources=[FakeSource("vci", error=RuntimeError("x"))],
-        state=JsonFileStateStore(tmp_path / "s.json"),
+        state=JsonFileStateStore(tmp_path / "s.json"), reader=NoFiles(),
     )  # fmt: skip
     assert out["failed"] == 1 and out["done"] == 0 and out["stopped_blocked"] is False
 
@@ -315,8 +326,9 @@ def test_job_exit_code(monkeypatch, capsys, summary, code):
     job = load_job()
     seen = {}
 
-    def fake(symbols, start, end, years_back):
+    def fake(symbols, start, end, years_back, refetch_all_years=()):
         seen.update(symbols=symbols, start=start, years_back=years_back)
+        assert refetch_all_years == ()
         return summary
 
     monkeypatch.setattr(job, "run_daily_ohlcv_summary", fake)
