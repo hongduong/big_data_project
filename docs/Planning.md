@@ -713,13 +713,13 @@ Nhánh `main` giữ nguyên, không nhận file nào từ bước này.
     | Kết luận | đạt | đạt | không đạt | không đạt | không đạt | không đạt |
 
     - Theo quy tắc mới chỉ còn một kiểm tra không đạt: độ đủ của mã thấp nhất. 7 mã dưới 98%: DTT 96,5%, COM 97,2%, SBV 97,2%, LGC 97,5%, SC5 97,6%, BTT 97,8%, CLW 97,9%. Đó là các ngày nến ngày có từ 100 cổ phiếu nhưng không có nến phút, phần lớn rơi vào cuối năm 2023; riêng SBV chủ yếu 2024–2025.
-    - Ngưỡng chưa đổi; chờ quyết định.
+    - Sau khi ghi `known_source_gaps` (66 ngày của 7 mã trên: gọi lại VCI ngày 28/11/2026, nguồn không có nến) và 51 giai đoạn mới của `known_periods` (26 mã nghi chuyển sàn), chạy lại cùng ngày: cả ba lượt đều ĐẠT. 412 mã: độ đủ 99,90%, mã thấp nhất PJT 98,09%, tỷ lệ ngày thưa 0,06%, khớp khối lượng 99,86%, p95 lệch hiệu dụng 0,12%. 382 mã: độ đủ 99,89%, mã thấp nhất PJT 98,09%. VN30: không đổi. Bộ toàn bộ dữ liệu (`__all_data`) giữ số cũ: độ đủ 99,88%, mã thấp nhất DTT 96,5%. Ngưỡng không đổi.
 12. **Dashboard đọc nến phút không quét bảng (28/11/2026):** trang chủ lấy số dòng và khoảng thời gian nến phút từ footer Parquet (không đọc bảng), số mã đếm trong tháng gần nhất; tab nến phút chỉ đọc thư mục tháng của ngày đang xem, danh sách ngày lấy từ nến ngày.
    - Lý do: giới hạn container 1GB, bảng 26,8 triệu dòng. Số đo trước/sau ở mục 2.2.
 
 ### Việc còn mở và rủi ro (28/11/2026)
 
-- 26 mã ngoài VN30 có dấu hiệu chuyển sàn giống BSR/MCH (nến ngoài giờ HOSE tới một ngày, rồi 5–18 phiên trống, rồi theo mẫu HOSE): GDA, BVB, AFX, VBB, HIO, KLB, VAB, NTC, ANT, PDV, MZG, ECO, GHC, DSC, TAL, TSA, DSH, BMJ, MCM, VVS, VTP, NAB, GEE, TCI, HTG, HNA. Chưa ghi vào `dq_notes.yaml`, chờ duyệt.
+- 26 mã ngoài VN30 có dấu hiệu chuyển sàn giống BSR/MCH (nến ngoài giờ HOSE tới một ngày, rồi 5–18 phiên trống, rồi theo mẫu HOSE): GDA, BVB, AFX, VBB, HIO, KLB, VAB, NTC, ANT, PDV, MZG, ECO, GHC, DSC, TAL, TSA, DSH, BMJ, MCM, VVS, VTP, NAB, GEE, TCI, HTG, HNA. Đã ghi vào `dq_notes.yaml` (28/11/2026) như BSR/MCH; suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết; ECO và HNA bằng chứng yếu hơn.
 - Clean `--full` dùng tới 3,6GB trên giới hạn 4GB mỗi worker (mục 5(a)).
 - File raw nến phút rất nhỏ (trung bình khoảng 360KB, 1.607 file): đầu vào cho phần gộp file.
-- Khi collector ghi lại file năm hiện tại của một mã, job clean dựng lại mọi tháng của năm đó (lượt e2e-sample 28/11 dựng lại 11 tháng của 2026 dù chỉ tháng 11 có nến mới). Chưa tìm nguyên nhân.
+- Khi collector ghi lại file năm hiện tại của một mã, job clean dựng lại mọi tháng của năm đó (lượt e2e-sample 28/11 dựng lại 11 tháng của 2026 dù chỉ tháng 11 có nến mới). Nguyên nhân: nến phút VCI là giá ĐÃ ĐIỀU CHỈNH; trong 25–27/11/2026 toàn bộ giá lịch sử của FPT bị nhân 0,9775 (9 mã mẫu khác không đổi), nên mọi nến FPT của 2026 đổi thật. Hệ quả chưa xử lý: collector chỉ ghi lại file năm hiện tại, nên file các năm trước của mã đó còn giá theo hệ số cũ (lệch nhau qua ranh giới năm); nến ngày VCI có cùng rủi ro.
