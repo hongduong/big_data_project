@@ -49,8 +49,12 @@ Ngày 05/01/2015, FPT: VCI trả 6.489,7 đồng; VNDirect trả `adClose` 6,49 
 ### 0.4 Tốc độ và giới hạn
 
 - 40 request liên tiếp tới VCI (1,9 giây) và VNDirect (0,5 giây) đều trả 200, không bị chặn.
-- **Chưa thử ở quy mô đầy đủ** (hàng nghìn request). Collector sẽ tự giới hạn ≤ 2 request/giây mỗi nguồn và có retry + backoff.
+- **Chưa thử ở quy mô đầy đủ khi viết mục này** (số đo thật với 412 mã ở cuối mục). Collector sẽ tự giới hạn ≤ 2 request/giây mỗi nguồn và có retry + backoff.
 - Ước tính tải đầy đủ: nến ngày 412 mã ≈ 412 request; nến phút 412 mã ≈ 2.900 request (khoảng 30–60 phút); khối ngoại VNDirect ≈ 1.000 request.
+- **Số đo thật với 412 mã HOSE (24–28/11/2026):**
+  - Nến phút, đợt 2 (382 mã ngoài VN30): 22.004.598 dòng, 1.491 file, 482,2MB (chưa nhân bản), 956 request ở 1 request/giây, khoảng 18 phút, không lỗi, không 429/403. Trung bình mã ngoài VN30 khoảng 57.600 dòng, 2,5 request; mã ở giữa khoảng 38.000 dòng.
+  - Bảng `raw/intraday_history` sau đợt 2: 412 mã, 26.833.717 dòng, 1.607 file, 585,3MB (1,17GB sau nhân bản).
+  - Nến ngày: tải thêm 382 mã từ VCI, 1.528 request (một request mỗi mã mỗi năm), 350.577 dòng; `clean/daily_ohlcv` 379.762 dòng, 414 mã (gồm VNINDEX).
 
 ### 0.5 Rủi ro còn lại của nguồn
 
@@ -204,6 +208,18 @@ Ngân sách: ≤ 26GB RAM, ≤ 14 vCPU. Tổng dùng: **24,5GB / 14 vCPU** (spar
 - Job streaming đặt `spark.cores.max=2` để không chiếm hết executor của job batch.
 - Khi chạy benchmark scale-out và storage thì dừng job streaming.
 - Dùng Compose `profiles` (`w1`, `w2`, `w3`) để bật 1, 2, 3 worker.
+
+**Số đo dashboard Streamlit với bảng nến phút 412 mã (28/11/2026, giới hạn container 1GB).**
+
+| Việc | Trước khi sửa | Sau khi sửa |
+|---|---|---|
+| Nạp nến phút một mã | 12–18 giây | 0,2–0,6 giây (một mã một ngày) |
+| Tải trang biểu đồ giá (lạnh) | 12,7 giây | 2,6 giây |
+| Trang chủ | — | 5,3 giây |
+| Đổi mã ở tab nến phút | — | 1,1 giây |
+| Bộ nhớ container | khoảng 790MB sau một phiên | đỉnh khoảng 390MB |
+
+Cách sửa ở mục 8, quyết định 12.
 
 ### 2.3 Image, cổng, volume
 
@@ -487,6 +503,18 @@ Replay và chia lại row group (đo sáng 24/11/2026):
 | Replay VN30 20 ngày (130.269 bản tin), mục tiêu 2.000 msg/giây | ~1.450 msg/giây | 2.000 msg/giây (2 lần); mục tiêu 5.000 đạt 4.999,7. Collector CPU trung vị 11%, đỉnh 54% (lúc đọc tháng đầu), RAM đỉnh 282MiB |
 | Chia lại 116 file `intraday_history` thành row group theo tháng | 116 row group, 100.729.764 byte | 1.125 row group, 103.078.443 byte (+2,3%), 64 giây, không gọi VCI |
 
+**Số đo với 412 mã (đo 24–28/11/2026, 3 worker, dữ liệu thật; số VN30 ở trên giữ nguyên để so).** Job clean nến phút trên toàn bộ: 27,6 triệu dòng raw (26,83 triệu history + 0,81 triệu streaming) → 26.833.717 dòng clean, 39 tháng, 357MB chưa nhân bản. `--full` dùng 60 phân vùng xáo trộn (quyết định 9).
+
+| Việc (nến phút) | VN30 (4,83 triệu dòng) | 412 mã (26,83 triệu dòng clean) |
+|---|---|---|
+| `--full` (dựng lại toàn bộ) | 44,0 giây | 92 giây |
+| Không đổi nhưng còn tháng bị kiểm lại | 22,5 giây | 25 giây |
+| Không đổi, đã ổn định | 4,7 giây | 1,4 giây |
+| Job DQ nến phút, cả lệnh (gồm khởi động Spark) | — | khoảng 49 giây |
+
+- Bộ nhớ đỉnh khi `--full` với 412 mã: mỗi worker 3,4–3,6GB trên giới hạn 4GB, driver 0,96GB trên 3GB.
+- Bộ nhớ đỉnh khi chạy job DQ nến phút trên 412 mã: worker 1,6–2,3GB, driver 1,1GB.
+
 ### (b) Đo end-to-end latency
 
 - Producer ghi `produced_ts` vào từng bản tin.
@@ -664,3 +692,34 @@ Nhánh `main` giữ nguyên, không nhận file nào từ bước này.
    - File `raw/intraday_history` có một row group mỗi tháng giờ VN (mục 4.3); 116 file VN30 cũ đã được chia lại tại chỗ, không gọi VCI.
    - Replay đọc từng tháng một bằng danh sách file tường minh, có luồng đọc trước tháng kế tiếp.
 8. **Quy tắc đạt/không đạt của DQ nến phút (24/11/2026):** check có bộ số loại trừ giai đoạn đã biết (`conf/app/dq_notes.yaml`) thì đạt/không đạt tính trên bộ số loại trừ; bộ số toàn bộ dữ liệu vẫn tính và ghi vào `dq_report` với tên `<check>__all_data`, chỉ để tham khảo. Check không có bộ số loại trừ (volume, ngày ngoài lịch) tính trên toàn bộ dữ liệu. Chi tiết ở `jobs/dq/README.md`.
+9. **Số phân vùng xáo trộn của job clean nến phút theo số dòng raw (28/11/2026):** đặt khoảng 500 nghìn dòng raw đọc vào mỗi phân vùng, không thấp hơn cấu hình sẵn (12), làm tròn lên bội số của nó, trần 240.
+   - Lý do: dữ liệu tăng từ 5,6 lên 27,6 triệu dòng raw. Số đo `--full` với 412 mã ở mục 5(a): 60 phân vùng xáo trộn.
+10. **Quy tắc DQ nến phút mới (28/11/2026), thay cho phần ngưỡng của quyết định 8; ngưỡng số giữ nguyên:**
+   - Ngày kỳ vọng có nến = ngày trong lịch, trong khoảng nến đầu–nến cuối của mã, mà nến ngày của mã có khối lượng >= 100 cổ phiếu. Thêm chỉ số chỉ đo số (mã, ngày) có nến ngày >= 100 cổ phiếu sau nến phút cuối.
+   - Ngày thưa = dưới 100 nến VÀ khối lượng phút thiếu hơn 1% và từ 1.000 cổ phiếu so với nến ngày. Số ngày dưới 100 nến vẫn ghi làm chỉ số chỉ đo.
+   - Khối lượng khớp khi lệch trong 1% hoặc dưới 1.000 cổ phiếu; p95 tính trên độ lệch hiệu dụng (0 nếu lệch dưới 1.000 cổ phiếu).
+   - 5 ngày nguồn có nến phút thừa (06/05/2025, 26/05/2025, 20/11/2025, 16/03/2026, 23/11/2026; 47 (mã, ngày), 42 mã, chưa rõ nguyên nhân phía nguồn) ghi trong `conf/app/dq_notes.yaml` và bị loại khỏi kiểm tra cứng "phút không lớn hơn ngày"; raw và clean giữ nguyên.
+   - Lý do: với 382 mã ngoài VN30, 19.912 (mã, ngày) thiếu nến gồm 6.342 không có dòng nến ngày, 9.231 khối lượng ngày bằng 0, 3.971 dưới 100 cổ phiếu, chỉ 368 từ 100 cổ phiếu trở lên. Nửa số mã có dưới 41 nến ở ngày điển hình. 98,5% số ngày lệch khối lượng quá 1% có khối lượng ngày không chia hết cho 100 (lô lẻ không có trong nến phút). Chi tiết ở `jobs/dq/README.md`.
+11. **Kết quả DQ nến phút ngày 28/11/2026 theo quy tắc mới (kèm quy tắc cũ để so):**
+
+    | Kiểm tra | VN30 mới | VN30 cũ | 382 mã mới | 382 mã cũ | 412 mã mới | 412 mã cũ |
+    |---|---|---|---|---|---|---|
+    | Độ đủ (>= 99,8%) | 100% | 100% | 99,87% | 93,27% | 99,88% | 93,74% |
+    | Mã thấp nhất (>= 98%) | 100% | 100% | 96,5% (DTT) | 17,4% (TTE) | 96,5% (DTT) | 17,4% (TTE) |
+    | Tỷ lệ ngày thưa (<= 1%) | 0,02% | 0,81% | 0,07% | 65,08% | 0,06% | 60,31% |
+    | Khớp khối lượng (>= 99%) | 99,84% | 99,64% | 99,86% | 94,15% | 99,86% | 94,57% |
+    | p95 lệch khối lượng (<= 1%) | 0,31% | 0,35% | 0,09% | 1,22% | 0,12% | 1,10% |
+    | Ngày phút > ngày (= 0) | 0 | 0 | 0 (47 trên toàn bộ dữ liệu) | 47 | 0 (47) | 47 |
+    | Kết luận | đạt | đạt | không đạt | không đạt | không đạt | không đạt |
+
+    - Theo quy tắc mới chỉ còn một kiểm tra không đạt: độ đủ của mã thấp nhất. 7 mã dưới 98%: DTT 96,5%, COM 97,2%, SBV 97,2%, LGC 97,5%, SC5 97,6%, BTT 97,8%, CLW 97,9%. Đó là các ngày nến ngày có từ 100 cổ phiếu nhưng không có nến phút, phần lớn rơi vào cuối năm 2023; riêng SBV chủ yếu 2024–2025.
+    - Ngưỡng chưa đổi; chờ quyết định.
+12. **Dashboard đọc nến phút không quét bảng (28/11/2026):** trang chủ lấy số dòng và khoảng thời gian nến phút từ footer Parquet (không đọc bảng), số mã đếm trong tháng gần nhất; tab nến phút chỉ đọc thư mục tháng của ngày đang xem, danh sách ngày lấy từ nến ngày.
+   - Lý do: giới hạn container 1GB, bảng 26,8 triệu dòng. Số đo trước/sau ở mục 2.2.
+
+### Việc còn mở và rủi ro (28/11/2026)
+
+- 26 mã ngoài VN30 có dấu hiệu chuyển sàn giống BSR/MCH (nến ngoài giờ HOSE tới một ngày, rồi 5–18 phiên trống, rồi theo mẫu HOSE): GDA, BVB, AFX, VBB, HIO, KLB, VAB, NTC, ANT, PDV, MZG, ECO, GHC, DSC, TAL, TSA, DSH, BMJ, MCM, VVS, VTP, NAB, GEE, TCI, HTG, HNA. Chưa ghi vào `dq_notes.yaml`, chờ duyệt.
+- Clean `--full` dùng tới 3,6GB trên giới hạn 4GB mỗi worker (mục 5(a)).
+- File raw nến phút rất nhỏ (trung bình khoảng 360KB, 1.607 file): đầu vào cho phần gộp file.
+- Khi collector ghi lại file năm hiện tại của một mã, job clean dựng lại mọi tháng của năm đó (lượt e2e-sample 28/11 dựng lại 11 tháng của 2026 dù chỉ tháng 11 có nến mới). Chưa tìm nguyên nhân.
