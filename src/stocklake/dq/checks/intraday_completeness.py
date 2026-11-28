@@ -42,6 +42,7 @@ DEFAULT_MAX_THIN_DAY_SHARE = 0.01  # ngày thưa <= 1% số (mã, ngày) kỳ v�
 OUTSIDE_CALENDAR = "intraday_days_outside_calendar"
 AFTER_LAST_BAR = "intraday_days_daily_volume_after_last_bar"
 _VN_OFFSET_SECONDS = 7 * 3600
+_QUANTILE_ACCURACY = 1000  # percentile_approx: sai số tương đối 1/1000, như _util.quantiles
 
 
 def _d(v: date | str):
@@ -333,11 +334,19 @@ def _count_if(cond: Column):
     return F.sum(F.when(cond, 1).otherwise(0))
 
 
-# ------------------------------------------------------------ giai đoạn đã biết
+# ------------------------------------------------------------ giai đoạn / khoảng trống đã biết
+
+# Thay cho start/end None khi dựng DataFrame giai đoạn (Spark date nhận được cả hai mốc).
+_OPEN_START = date(1900, 1, 1)
+_OPEN_END = date(9999, 12, 31)
+PERIOD_ID = "_known_period_id"
 
 
 def period_condition(periods: Sequence[KnownPeriod]) -> Column:
-    """Điều kiện Spark: (symbol, trade_date) nằm trong một giai đoạn đã biết."""
+    """Điều kiện Spark: (symbol, trade_date) nằm trong một giai đoạn đã biết.
+
+    Một nhánh OR mỗi giai đoạn: chỉ hợp với ít giai đoạn; runner dùng join (`known_periods_df`).
+    """
     from pyspark.sql import functions as F
 
     cond = F.lit(False)
@@ -351,11 +360,99 @@ def period_condition(periods: Sequence[KnownPeriod]) -> Column:
     return cond
 
 
+def known_periods_df(spark: Any, periods: Sequence[KnownPeriod]) -> DataFrame:
+    """DataFrame nhỏ các giai đoạn: PERIOD_ID (chỉ số trong `periods`), p_symbol, p_start, p_end.
+
+    start/end None được thay bằng mốc rất xa để điều kiện join chỉ là `between`.
+    """
+    rows = [
+        (i, p.symbol, p.start or _OPEN_START, p.end or _OPEN_END) for i, p in enumerate(periods)
+    ]
+    return spark.createDataFrame(
+        rows, f"{PERIOD_ID} int, p_symbol string, p_start date, p_end date"
+    )
+
+
+def _period_join_cond() -> Column:
+    from pyspark.sql import functions as F
+
+    return (F.col("symbol") == F.col("p_symbol")) & F.col("trade_date").between(
+        F.col("p_start"), F.col("p_end")
+    )
+
+
+def tag_known_periods(df: DataFrame, periods_df: DataFrame, how: str = "left") -> DataFrame:
+    """Gắn cột PERIOD_ID (null nếu ngoài mọi giai đoạn) cho từng dòng có symbol, trade_date.
+
+    Join broadcast với `known_periods_df` (khoá symbol + khoảng ngày). Giai đoạn của cùng mã
+    không chồng nhau (notes kiểm) nên mỗi dòng khớp tối đa một giai đoạn, không nhân dòng.
+    `how="inner"` chỉ giữ dòng thuộc một giai đoạn.
+    """
+    from pyspark.sql import functions as F
+
+    return df.join(F.broadcast(periods_df), _period_join_cond(), how).drop(
+        "p_symbol", "p_start", "p_end"
+    )
+
+
 def exclude_known_periods(coverage_df: DataFrame, periods: Sequence[KnownPeriod]) -> DataFrame:
-    """Bỏ các (mã, ngày) thuộc giai đoạn đã biết (gồm cả ngày trống) khỏi coverage."""
+    """Bỏ các (mã, ngày) thuộc giai đoạn đã biết (gồm cả ngày trống) khỏi coverage.
+
+    Anti-join broadcast với DataFrame các giai đoạn (không dựng OR theo từng giai đoạn).
+    """
+    from pyspark.sql import functions as F
+
     if not periods:
         return coverage_df
-    return coverage_df.filter(~period_condition(periods))
+    pdf = known_periods_df(coverage_df.sparkSession, periods)
+    return coverage_df.join(F.broadcast(pdf), _period_join_cond(), "left_anti")
+
+
+def source_gaps_df(spark: Any, pairs: Sequence[tuple[str, date]]) -> DataFrame:
+    """DataFrame nhỏ (symbol, trade_date) của các khoảng trống nguồn đã biết."""
+    return spark.createDataFrame(list(pairs), "symbol string, trade_date date")
+
+
+def exclude_known_source_gaps(df: DataFrame, pairs: Sequence[tuple[str, date]]) -> DataFrame:
+    """Bỏ các (symbol, trade_date) trong `pairs` (DqNotes.source_gap_pairs()) khỏi `df`.
+
+    Anti-join broadcast trên khoá (symbol, trade_date).
+    """
+    from pyspark.sql import functions as F
+
+    if not pairs:
+        return df
+    gaps = F.broadcast(source_gaps_df(df.sparkSession, pairs))
+    return df.join(gaps, ["symbol", "trade_date"], "left_anti")
+
+
+def source_gap_stats(coverage_df: DataFrame, pairs: Sequence[tuple[str, date]]) -> dict[str, int]:
+    """Khoảng trống nguồn đã biết: số mã, số (mã, ngày) trong ghi chú, và trong `coverage_df`
+    (ngày kỳ vọng, đã cắt theo mã / start / end của lượt chạy) bao nhiêu cặp là ngày kỳ vọng,
+    bao nhiêu cặp là ngày kỳ vọng thiếu nến. Một action Spark (không có cặp nào thì không chạy).
+    """
+    from pyspark.sql import functions as F
+
+    out = {
+        "symbols": len({s for s, _ in pairs}),
+        "days": len(set(pairs)),
+        "expected_days": 0,
+        "expected_missing_days": 0,
+    }
+    if not pairs:
+        return out
+    gaps = F.broadcast(source_gaps_df(coverage_df.sparkSession, pairs).distinct())
+    row = (
+        coverage_df.join(gaps, ["symbol", "trade_date"])
+        .agg(
+            F.count(F.lit(1)).alias("n"),
+            _count_if(~F.col("has_data")).alias("missing"),
+        )
+        .collect()[0]
+    )
+    out["expected_days"] = int(row["n"] or 0)
+    out["expected_missing_days"] = int(row["missing"] or 0)
+    return out
 
 
 def known_period_stats(
@@ -375,55 +472,105 @@ def known_period_stats(
     calendar_days (mọi ngày lịch trong [đầu, cuối] của mã — quy tắc cũ; chỉ có khi truyền
     `calendar_days_df`), bars_per_day (trên ngày kỳ vọng có dữ liệu). Thêm số nến trước 09:15,
     trong giờ nghỉ trưa (11:30–13:00), sau 14:45 để so với mẫu HOSE.
+
+    Số action Spark cố định, không phụ thuộc số giai đoạn: gắn chỉ số giai đoạn cho từng dòng
+    (join broadcast với `known_periods_df`) rồi groupBy chỉ số — 1 action trên `coverage_df`
+    (đếm + min/max + percentile_approx), 1 trên `calendar_days_df` (nếu có), 1 lần quét nến
+    phút chỉ của các mã có giai đoạn (`symbol IN (...)`). Kết quả theo thứ tự `periods`.
     """
     from pyspark.sql import functions as F
 
-    bars = _bars(intraday_df, symbols)
+    if not periods:
+        return []
+    spark = coverage_df.sparkSession
+    pdf = known_periods_df(spark, periods)
+    has = F.col("has_data")
+    n_bars_has = F.when(has, F.col("n_bars"))
+    cov_rows = (
+        tag_known_periods(coverage_df, pdf, "inner")
+        .groupBy(PERIOD_ID)
+        .agg(
+            F.count(F.lit(1)).alias("expected"),
+            _count_if(thin_day_condition(min_bars_per_day)).alias("thin"),
+            _count_if(low_bar_condition(min_bars_per_day)).alias("low"),
+            _count_if(has).alias("days"),
+            F.min(n_bars_has).alias("lo"),
+            F.max(n_bars_has).alias("hi"),
+            # cùng sai số tương đối 0.001 như `quantiles` (approxQuantile) dùng
+            F.percentile_approx(
+                n_bars_has.cast("double"), [0.05, 0.5, 0.95], _QUANTILE_ACCURACY
+            ).alias("q"),
+        )
+        .collect()
+    )
+    cov_by = {r[PERIOD_ID]: r for r in cov_rows}
+
+    cal_by: dict[int, int] = {}
+    if calendar_days_df is not None:
+        cal_rows = (
+            tag_known_periods(calendar_days_df, pdf, "inner")
+            .groupBy(PERIOD_ID)
+            .agg(F.count(F.lit(1)).alias("n"))
+            .collect()
+        )
+        cal_by = {r[PERIOD_ID]: int(r["n"]) for r in cal_rows}
+
+    bars = _bars(intraday_df, symbols).filter(
+        F.col("symbol").isin(sorted({p.symbol for p in periods}))
+    )
     if start is not None:
         bars = bars.filter(F.col("trade_date") >= _d(start))
     if end is not None:
         bars = bars.filter(F.col("trade_date") <= _d(end))
     m = (((F.col("bar_ts").cast("long") + _VN_OFFSET_SECONDS) % 86400) / 60).cast("int")
     bars = bars.withColumn("m", m)  # phút trong ngày, giờ VN
+    bar_rows = (
+        tag_known_periods(bars, pdf, "inner")
+        .groupBy(PERIOD_ID)
+        .agg(
+            F.count(F.lit(1)).alias("bars"),
+            _count_if((F.col("m") < 9 * 60) | (F.col("m") > 15 * 60)).alias("outside"),
+            _count_if(F.col("m") < 9 * 60 + 15).alias("pre"),
+            _count_if((F.col("m") > 11 * 60 + 30) & (F.col("m") < 13 * 60)).alias("lunch"),
+            _count_if(F.col("m") > 14 * 60 + 45).alias("post"),
+        )
+        .collect()
+    )
+    bar_by = {r[PERIOD_ID]: r for r in bar_rows}
+
+    def get(row: Any, key: str) -> int:
+        return int(row[key] or 0) if row is not None else 0
 
     out = []
-    for p in periods:
-        cov = coverage_df.filter(period_condition([p]))
-        cov_row = cov.agg(
-            F.count(F.lit(1)).alias("expected"),
-            _count_if(thin_day_condition(min_bars_per_day)).alias("thin"),
-            _count_if(low_bar_condition(min_bars_per_day)).alias("low"),
-        ).collect()[0]
-        cnt = (
-            bars.filter(period_condition([p]))
-            .agg(
-                F.count(F.lit(1)).alias("bars"),
-                _count_if((F.col("m") < 9 * 60) | (F.col("m") > 15 * 60)).alias("outside"),
-                _count_if(F.col("m") < 9 * 60 + 15).alias("pre"),
-                _count_if((F.col("m") > 11 * 60 + 30) & (F.col("m") < 13 * 60)).alias("lunch"),
-                _count_if(F.col("m") > 14 * 60 + 45).alias("post"),
-            )
-            .collect()[0]
-        )
+    for i, p in enumerate(periods):
+        c, b = cov_by.get(i), bar_by.get(i)
+        q = (c["q"] if c is not None else None) or [None, None, None]
         st: dict[str, Any] = {
             "symbol": p.symbol,
             "label": p.label,
             "start": p.start.isoformat() if p.start else None,
             "end": p.end.isoformat() if p.end else None,
-            "expected_days": int(cov_row["expected"] or 0),
-            "thin_days": int(cov_row["thin"] or 0),
-            "low_bar_days": int(cov_row["low"] or 0),
+            "expected_days": get(c, "expected"),
+            "thin_days": get(c, "thin"),
+            "low_bar_days": get(c, "low"),
         }
         if calendar_days_df is not None:
-            st["calendar_days"] = calendar_days_df.filter(period_condition([p])).count()
+            st["calendar_days"] = cal_by.get(i, 0)
         st.update(
             {
-                "bars_per_day": bars_per_day_distribution(cov),
-                "bars": int(cnt["bars"] or 0),
-                "bars_outside_0900_1500_vn": int(cnt["outside"] or 0),
-                "bars_before_0915_vn": int(cnt["pre"] or 0),
-                "bars_lunch_1130_1300_vn": int(cnt["lunch"] or 0),
-                "bars_after_1445_vn": int(cnt["post"] or 0),
+                "bars_per_day": {
+                    "days_with_data": get(c, "days"),
+                    "min": c["lo"] if c is not None else None,
+                    "p5": None if q[0] is None else float(q[0]),
+                    "p50": None if q[1] is None else float(q[1]),
+                    "p95": None if q[2] is None else float(q[2]),
+                    "max": c["hi"] if c is not None else None,
+                },
+                "bars": get(b, "bars"),
+                "bars_outside_0900_1500_vn": get(b, "outside"),
+                "bars_before_0915_vn": get(b, "pre"),
+                "bars_lunch_1130_1300_vn": get(b, "lunch"),
+                "bars_after_1445_vn": get(b, "post"),
             }
         )
         out.append(st)

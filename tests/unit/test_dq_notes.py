@@ -10,6 +10,7 @@ from stocklake.dq.notes import (
     DqNotes,
     KnownAnomaly,
     KnownPeriod,
+    KnownSourceGap,
     annotate,
     load_dq_notes,
     parse_notes,
@@ -22,13 +23,35 @@ def test_repo_dq_notes_yaml_is_valid():
     pytest.importorskip("yaml")
     notes = load_dq_notes(Settings(app_conf_dir=str(CONF_DIR)))
     assert notes.source and notes.source.endswith("dq_notes.yaml")
-    periods = {(p.symbol, p.label): p for p in notes.known_periods}
-    assert set(periods) == {
+    # 4 mục BSR/MCH + 51 mục của 26 mã nghi chuyển sàn (rà 28/11/2026)
+    assert len(notes.known_periods) == 55
+    assert len({p.symbol for p in notes.known_periods}) == 28
+    assert [(p.symbol, p.label) for p in notes.known_periods[:4]] == [
         ("BSR", "truoc_chuyen_san"),
         ("BSR", "khoang_trong_chuyen_san"),
         ("MCH", "truoc_chuyen_san"),
         ("MCH", "khoang_trong_chuyen_san"),
+    ]
+    periods = {(p.symbol, p.label): p for p in notes.known_periods[:4]}
+    assert len(notes.known_anomalies) == 6
+    # khoảng trống nguồn: 7 mã, 66 (mã, ngày)
+    gaps = {g.symbol: g for g in notes.known_source_gaps}
+    assert set(gaps) == {"BTT", "CLW", "COM", "DTT", "LGC", "SBV", "SC5"}
+    assert {s: len(g.dates) for s, g in gaps.items()} == {
+        "BTT": 4,
+        "CLW": 6,
+        "COM": 12,
+        "DTT": 7,
+        "LGC": 6,
+        "SBV": 20,
+        "SC5": 11,
     }
+    pairs = notes.source_gap_pairs()
+    assert len(pairs) == len(set(pairs)) == 66
+    for g in notes.known_source_gaps:
+        assert g.label == "nguon_khong_co_nen_phut"
+        assert f"cho {len(g.dates)} ngày" in g.note and "giữ nguyên ở raw và clean" in g.note
+    assert ("DTT", dt.date(2024, 11, 20)) in pairs
     assert periods[("BSR", "truoc_chuyen_san")].start is None
     assert periods[("BSR", "truoc_chuyen_san")].end == dt.date(2025, 1, 6)
     assert periods[("BSR", "khoang_trong_chuyen_san")].end == dt.date(2025, 1, 16)
@@ -63,6 +86,8 @@ def test_repo_dq_notes_yaml_is_valid():
     assert js["known_anomalies"][0]["exclude_from"] == []
     assert js["known_anomalies"][1]["exclude_from"] == ["volume_minute_gt_daily"]
     assert {p["end"] for p in js["known_periods"]} >= {"2025-01-06", "2025-12-17"}
+    assert len(js["known_source_gaps"]) == 7
+    assert sum(len(g["dates"]) for g in js["known_source_gaps"]) == 66
     json.dumps(js)
 
 
@@ -135,6 +160,52 @@ def test_parse_exclude_from():
         {"known_anomalies": [{"date": "2024-11-15", "label": "x", "exclude_from": "a"}]},
         {"known_anomalies": [{"date": "2024-11-15", "label": "x", "exclude_from": [["a"]]}]},
         ["not", "a", "mapping"],
+        # known_source_gaps
+        {"known_source_gaps": [{"symbol": "dtt", "dates": ["2024-11-20"], "label": "x"}]},
+        {"known_source_gaps": [{"symbol": "DTT", "dates": [], "label": "x"}]},
+        {"known_source_gaps": [{"symbol": "DTT", "label": "x"}]},
+        {"known_source_gaps": [{"symbol": "DTT", "dates": "2024-11-20", "label": "x"}]},
+        {"known_source_gaps": [{"symbol": "DTT", "dates": ["2024-02-30"], "label": "x"}]},
+        {"known_source_gaps": [{"symbol": "DTT", "dates": ["20/11/2024"], "label": "x"}]},
+        {"known_source_gaps": [{"symbol": "DTT", "dates": [None], "label": "x"}]},
+        {"known_source_gaps": [{"symbol": "DTT", "dates": ["2024-11-20"]}]},
+        {
+            "known_source_gaps": [
+                {"symbol": "DTT", "dates": ["2024-11-20", "2024-11-20"], "label": "x"}
+            ]
+        },
+        {
+            "known_source_gaps": [
+                {"symbol": "DTT", "dates": ["2024-11-20"], "label": "x"},
+                {"symbol": "DTT", "dates": ["2024-11-20"], "label": "y"},
+            ]
+        },
+        {"known_source_gaps": {"symbol": "DTT"}},
+        # hai giai đoạn của cùng mã chồng nhau
+        {
+            "known_periods": [
+                {"symbol": "BSR", "end": "2025-01-06", "label": "a"},
+                {"symbol": "BSR", "start": "2025-01-06", "end": "2025-01-16", "label": "b"},
+            ]
+        },
+        {
+            "known_periods": [
+                {"symbol": "BSR", "start": "2025-01-07", "end": "2025-01-16", "label": "b"},
+                {"symbol": "BSR", "end": "2025-01-10", "label": "a"},
+            ]
+        },
+        {
+            "known_periods": [
+                {"symbol": "BSR", "end": "2025-01-06", "label": "a"},
+                {"symbol": "BSR", "end": "2024-01-06", "label": "b"},
+            ]
+        },
+        {
+            "known_periods": [
+                {"symbol": "BSR", "start": "2025-01-07", "label": "a"},
+                {"symbol": "BSR", "start": "2026-01-01", "end": "2026-02-01", "label": "b"},
+            ]
+        },
     ],
 )
 def test_parse_rejects_malformed(conf):
@@ -165,3 +236,73 @@ def test_annotate_rows():
     ]
     p = KnownPeriod("BSR", dt.date(2025, 1, 7), None, "sau")
     assert p.contains("BSR", dt.date(2030, 1, 1)) and not p.contains("BSR", dt.date(2025, 1, 6))
+
+
+def test_periods_of_same_symbol_may_touch_but_not_overlap():
+    notes = parse_notes(
+        {
+            "known_periods": [
+                {"symbol": "BSR", "start": "2025-01-07", "end": "2025-01-16", "label": "b"},
+                {"symbol": "BSR", "end": "2025-01-06", "label": "a"},
+                {"symbol": "BSR", "start": "2025-01-17", "label": "c"},
+                {"symbol": "MCH", "end": "2025-01-10", "label": "a"},  # mã khác: không xét
+            ]
+        }
+    )
+    assert [p.label for p in notes.known_periods] == ["b", "a", "c", "a"]  # giữ thứ tự file
+
+
+def test_parse_known_source_gaps_and_annotate():
+    notes = parse_notes(
+        {
+            "known_periods": [{"symbol": "BSR", "end": "2025-01-06", "label": "truoc"}],
+            "known_source_gaps": [
+                {
+                    "symbol": "DTT",
+                    "dates": ["2023-10-16", dt.date(2024, 11, 20)],
+                    "label": "nguon_khong_co_nen_phut",
+                    "note": " ghi chú ",
+                },
+                {"symbol": "SBV", "dates": ["2024-11-20"], "label": "khac"},
+            ],
+        }
+    )
+    dtt, sbv = notes.known_source_gaps
+    assert dtt == KnownSourceGap(
+        "DTT", (dt.date(2023, 10, 16), dt.date(2024, 11, 20)), "nguon_khong_co_nen_phut", "ghi chú"
+    )
+    assert notes.source_gap_pairs() == (
+        ("DTT", dt.date(2023, 10, 16)),
+        ("DTT", dt.date(2024, 11, 20)),
+        ("SBV", dt.date(2024, 11, 20)),
+    )
+    assert dtt.contains("DTT", dt.date(2024, 11, 20)) and not dtt.contains(
+        "DTT", dt.date(2024, 11, 21)
+    )
+    assert not dtt.contains("SBV", dt.date(2024, 11, 20))
+    rows = [
+        {"symbol": "DTT", "trade_date": "2024-11-20"},
+        {"symbol": "DTT", "trade_date": "2024-11-21"},
+        {"symbol": "SBV", "trade_date": dt.date(2024, 11, 20)},
+        {"symbol": "DTT"},  # danh sách theo mã
+        {"symbol": "BSR", "trade_date": "2024-11-20"},
+    ]
+    assert [r["note"] for r in annotate(rows, notes)] == [
+        "nguon_khong_co_nen_phut",
+        None,
+        "khac",
+        "nguon_khong_co_nen_phut",
+        "truoc",
+    ]
+    js = notes.to_json()
+    assert js["known_source_gaps"][0] == {
+        "symbol": "DTT",
+        "dates": ["2023-10-16", "2024-11-20"],
+        "label": "nguon_khong_co_nen_phut",
+        "note": "ghi chú",
+    }
+    json.dumps(js)
+    # thiếu mục: rỗng
+    assert parse_notes({"known_periods": []}).known_source_gaps == ()
+    assert parse_notes({"known_source_gaps": None}).source_gap_pairs() == ()
+    assert DqNotes().to_json()["known_source_gaps"] == []

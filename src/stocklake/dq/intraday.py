@@ -145,16 +145,18 @@ def run_intraday_dq(
 
     `notes` None: đọc conf/app/dq_notes.yaml (thiếu file = không có ghi chú). Check có hai bộ số
     đạt/không đạt trên bộ loại trừ: check đầy đủ ngày (tỉ lệ phủ, mã thấp nhất, ngày thiếu, ngày
-    thưa, ngày ít nến) bỏ giai đoạn đã biết; volume phút > ngày bỏ ngày bất thường đánh dấu
-    `exclude_from: [volume_minute_gt_daily]`. Bộ số toàn bộ dữ liệu là `reference_all_data`
-    (JSON) / `<check>__all_data` (dq_report).
+    thưa, ngày ít nến) bỏ giai đoạn đã biết và các (mã, ngày) `known_source_gaps`; volume phút
+    > ngày bỏ ngày bất thường đánh dấu `exclude_from: [volume_minute_gt_daily]`. Bộ số toàn bộ
+    dữ liệu là `reference_all_data` (JSON) / `<check>__all_data` (dq_report).
 
     Trả dict JSON-serialisable: run_id, verdict_rule, passed, lock_waited_s, thresholds, results
     (mỗi check: metric, threshold, passed, basis, reference_all_data), known_periods_excluded,
     notes, excluding_known_periods, known_period_stats, volume_distribution, worst_volume_days,
     thinnest_days, missing_days_by_symbol, bars_per_day, rows_written; thêm từ 28/11/2026:
     expected_day_filter, thin_days_top, days_daily_volume_after_last_bar_by_symbol,
-    volume_minute_gt_daily_excluded, minute_gt_daily_days, legacy_rules.
+    volume_minute_gt_daily_excluded, minute_gt_daily_days, legacy_rules,
+    known_source_gaps_excluded (symbols, days: trong ghi chú; expected_days, expected_missing_days:
+    trong số đó bao nhiêu cặp là ngày kỳ vọng / ngày kỳ vọng thiếu nến của lượt chạy).
     """
     from stocklake.common import locks
     from stocklake.dq.report import write_report
@@ -192,11 +194,13 @@ def _compute(
     """Đọc clean và tính toàn bộ báo cáo; mọi thứ đã được thu về Python khi hàm trả.
 
     Bảng nến phút chỉ được quét một lần (`comp.intraday_per_day`, cache); các khung theo
-    (mã, ngày) khác dựng từ đó. known_period_stats vẫn đọc nến của các giai đoạn đã biết.
+    (mã, ngày) khác dựng từ đó. known_period_stats đọc nến của các mã có giai đoạn đã biết trong
+    MỘT lần quét (lọc `symbol IN (...)`), mọi giai đoạn tính chung bằng join + groupBy.
     """
     from pyspark.sql import functions as F
 
     periods = notes.known_periods
+    gap_pairs = notes.source_gap_pairs()
     gt_anomalies = notes.anomalies_excluded_from(EXCLUDE_VOLUME_MINUTE_GT_DAILY)
     intraday = _read_clean(spark, "intraday_1m", ["symbol", "bar_ts", "trade_date", "volume"])
     daily = _read_clean(spark, "daily_ohlcv", ["symbol", "trade_date", "volume"])
@@ -218,7 +222,10 @@ def _compute(
         all_res = comp.summarize_completeness(
             coverage, outside_df=outside, run_id=run_id, run_ts=run_ts
         )
-        excl = comp.exclude_known_periods(coverage, periods)
+        # bộ kết luận của phần đầy đủ ngày: bỏ giai đoạn đã biết VÀ khoảng trống nguồn đã biết
+        excl = comp.exclude_known_source_gaps(
+            comp.exclude_known_periods(coverage, periods), gap_pairs
+        )
         excl_res = comp.summarize_completeness(excl, run_id=run_id, run_ts=run_ts)
         distribution = vol.volume_diff_distribution(diff)
         vol_res = vol.summarize_volume(
@@ -243,7 +250,9 @@ def _compute(
         )
         all_symbol, _ = comp.symbol_coverage_min(coverage)
         excl_symbol, _ = comp.symbol_coverage_min(excl)
-        legacy = comp.legacy_completeness(comp.exclude_known_periods(cal_days, periods))
+        legacy = comp.legacy_completeness(
+            comp.exclude_known_source_gaps(comp.exclude_known_periods(cal_days, periods), gap_pairs)
+        )
         legacy.update(vol.legacy_volume(distribution))
         report = {
             "run_id": run_id,
@@ -252,9 +261,11 @@ def _compute(
             "thresholds": _thresholds(),
             "results": _checks_json(verdict, all_symbol, excl_symbol),
             "known_periods_excluded": len(periods),
+            "known_source_gaps_excluded": comp.source_gap_stats(coverage, gap_pairs),
             "notes": notes.to_json(),
             "excluding_known_periods": {
                 "periods_excluded": len(periods),
+                "source_gap_days_excluded": len(set(gap_pairs)),
                 "bars_per_day": _jsonify(comp.bars_per_day_distribution(excl)),
             },
             "known_period_stats": [
@@ -298,7 +309,8 @@ def _compute(
                 "description": (
                     "Số theo quy tắc trước 28/11/2026, chỉ để so, không ghi dq_report. Đầy đủ "
                     "ngày: kỳ vọng = mọi ngày lịch trong [ngày nến đầu, ngày nến cuối], ngày "
-                    "thưa = < min_bars_per_day nến, bỏ giai đoạn đã biết như bộ kết luận. "
+                    "thưa = < min_bars_per_day nến, bỏ giai đoạn đã biết và khoảng trống nguồn "
+                    "đã biết như bộ kết luận. "
                     "Volume: khớp chỉ khi |rel_diff| <= volume_tolerance, toàn bộ dữ liệu, "
                     "không loại ngày bất thường."
                 ),

@@ -76,7 +76,7 @@ tuỳ check (trường `basis` trong JSON):
 
 | Check | Bộ loại trừ (`basis`) |
 |---|---|
-| `intraday_day_coverage_ratio`, `intraday_symbol_coverage_ratio_min`, `intraday_days_missing`, `intraday_thin_days`, `intraday_thin_day_share`, `intraday_low_bar_days`, `intraday_low_bar_day_share` | bỏ giai đoạn đã biết (`excluding_known_periods`) |
+| `intraday_day_coverage_ratio`, `intraday_symbol_coverage_ratio_min`, `intraday_days_missing`, `intraday_thin_days`, `intraday_thin_day_share`, `intraday_low_bar_days`, `intraday_low_bar_day_share` | bỏ giai đoạn đã biết và khoảng trống nguồn đã biết (`excluding_known_periods`) |
 | `intraday_volume_days_minute_gt_daily` | bỏ ngày bất thường có `exclude_from: [volume_minute_gt_daily]` (`excluding_known_anomalies`) |
 
 Các check còn lại (volume khác, `intraday_days_outside_calendar`,
@@ -153,9 +153,18 @@ Volume tính trên mọi ngày có nến phút (không chỉ ngày kỳ vọng),
 
 Dữ liệu, không phải code; thiếu file thì chạy không có ghi chú. Không lọc gì ở raw/clean.
 
-- `known_periods`: giai đoạn đã biết của một mã (hiện có BSR, MCH: trước khi chuyển sang HOSE
-  giờ giao dịch khác mẫu HOSE, rồi vài phiên không có nến). Suy ra từ dữ liệu, chưa đối chiếu
-  nguồn niêm yết.
+- `known_periods`: giai đoạn đã biết của một mã (BSR, MCH và từ 28/11/2026 thêm 26 mã ngoài
+  VN30 nghi chuyển sàn, tổng 55 giai đoạn của 28 mã: trước khi chuyển sang HOSE giờ giao dịch
+  khác mẫu HOSE, rồi thường vài phiên không có nến; ECO và HNA bằng chứng yếu hơn). Suy ra từ
+  dữ liệu (rà clean/intraday_1m), CHƯA đối chiếu nguồn niêm yết. Hai giai đoạn của cùng mã không
+  được chồng nhau (nạp file sẽ báo lỗi).
+- `known_source_gaps` (từ 28/11/2026): các (mã, ngày) mà nguồn VCI không có nến phút dù nến ngày
+  có từ 100 cổ phiếu — khoảng trống đã biết của nguồn, không phải lỗi pipeline. Hiện có 66 (mã,
+  ngày) của 7 mã (BTT, CLW, COM, DTT, LGC, SBV, SC5). Kiểm 28/11/2026: gọi lại VCI cho đúng 66
+  cặp này, nguồn không trả nến nào; 7 ngày đối chứng của cùng các mã thì trả đúng. Các cặp này bị
+  loại khỏi bộ số kết luận của phần đầy đủ ngày giống giai đoạn đã biết (vẫn `basis:
+  excluding_known_periods`; bộ toàn bộ dữ liệu vẫn ở `__all_data` / `reference_all_data`), và
+  khỏi `legacy_rules`. Raw và clean giữ nguyên.
 - `known_anomalies`: ngày bất thường đã biết. Trường tuỳ chọn `exclude_from` (mặc định rỗng; giá
   trị hợp lệ duy nhất hiện nay `volume_minute_gt_daily`) loại ngày đó khỏi bộ số kết luận của kiểm
   tra cứng tương ứng; không có trường này thì chỉ gắn nhãn. Hiện có:
@@ -168,8 +177,11 @@ Trong JSON của job:
 
 - `results`: các check kết luận (xem trên), kèm `reference_all_data` khi có.
 - `notes`: nội dung ghi chú đã nạp (mỗi ngày bất thường có `exclude_from`).
-- `excluding_known_periods`: `periods_excluded` và phân phối nến/ngày của bộ số loại trừ (ngày kỳ
-  vọng); các metric của bộ số này nằm ở `results`.
+- `excluding_known_periods`: `periods_excluded`, `source_gap_days_excluded` và phân phối
+  nến/ngày của bộ số loại trừ (ngày kỳ vọng); các metric của bộ số này nằm ở `results`.
+- `known_source_gaps_excluded`: `symbols`, `days` (số mã, số (mã, ngày) trong ghi chú),
+  `expected_days`, `expected_missing_days` (trong số đó bao nhiêu cặp là ngày kỳ vọng / ngày kỳ
+  vọng thiếu nến trong phạm vi lượt chạy). `known_periods_excluded` giữ nghĩa cũ (số giai đoạn).
 - `known_period_stats`: mỗi giai đoạn — số ngày kỳ vọng (`expected_days`), số ngày lịch theo quy tắc
   cũ (`calendar_days`), `thin_days` (định nghĩa mới), `low_bar_days` (< 100 nến), phân phối
   nến/ngày, số nến ngoài 09:00–15:00 giờ VN (kèm trước 09:15, nghỉ trưa, sau 14:45).
@@ -184,7 +196,8 @@ Trong JSON của job:
   vọng); trường `note` ghi nhãn giai đoạn / ngày bất thường mà dòng đó rơi vào (null nếu không).
 - `legacy_rules`: số theo quy tắc cũ để so — `day_coverage_ratio`, `symbol_coverage_ratio_min` (+
   `symbol_coverage_min_symbol`), `days_expected`, `days_missing`, `thin_days`/`thin_day_share`
-  (< 100 nến) tính trên mọi ngày lịch trong [đầu, cuối], đã bỏ giai đoạn đã biết như bộ kết luận;
+  (< 100 nến) tính trên mọi ngày lịch trong [đầu, cuối], đã bỏ giai đoạn đã biết và khoảng trống
+  nguồn đã biết như bộ kết luận;
   `volume_match_ratio` (chỉ 1%), `volume_abs_diff_p95` (thô), `volume_days_minute_gt_daily`
   (không loại ngày nào) trên toàn bộ dữ liệu như check volume.
 
@@ -206,10 +219,17 @@ hai. Trong ngoặc: ngưỡng đạt.
 Theo quy tắc mới chỉ còn một kiểm tra không đạt là độ đủ của mã thấp nhất (ngưỡng 98%). 7 mã dưới
 98%: DTT 96,5%, COM 97,2%, SBV 97,2%, LGC 97,5%, SC5 97,6%, BTT 97,8%, CLW 97,9% (các ngày nến
 ngày có từ 100 cổ phiếu nhưng không có nến phút, phần lớn rơi vào cuối năm 2023; riêng SBV chủ yếu
-2024–2025). Ngưỡng chưa đổi; chờ quyết định.
+2024–2025). Số trong bảng đo TRƯỚC khi thêm `known_source_gaps` và 51 giai đoạn mới của
+`known_periods`.
+
+Sau khi ghi `known_source_gaps` (66 ngày của 7 mã trên: gọi lại VCI ngày 28/11/2026, nguồn không có nến) và 51 giai đoạn mới của `known_periods` (26 mã nghi chuyển sàn), chạy lại cùng ngày: cả ba lượt đều ĐẠT. 412 mã: độ đủ 99,90%, mã thấp nhất PJT 98,09%, tỷ lệ ngày thưa 0,06%, khớp khối lượng 99,86%, p95 lệch hiệu dụng 0,12%. 382 mã: độ đủ 99,89%, mã thấp nhất PJT 98,09%. VN30: không đổi. Bộ toàn bộ dữ liệu (`__all_data`) giữ số cũ: độ đủ 99,88%, mã thấp nhất DTT 96,5%.
 
 ## Hiệu năng
 
 Bảng nến phút (26,8 triệu dòng) chỉ quét một lần thành bảng theo (mã, ngày) có số nến, nến
 đầu/cuối và tổng volume (cache); độ đủ, volume, ngày ngoài lịch, ngày sau nến cuối đều dựng từ
-bảng này. Riêng `known_period_stats` vẫn đọc nến của các mã có giai đoạn đã biết (như trước).
+bảng này. `known_period_stats` tính mọi giai đoạn trong số action cố định (3, không phụ thuộc số
+giai đoạn): gắn chỉ số giai đoạn bằng join broadcast với DataFrame các giai đoạn rồi groupBy (phân
+vị bằng `percentile_approx`), và đọc nến phút đúng MỘT lần, lọc `symbol IN (...)` các mã có giai
+đoạn. Loại trừ giai đoạn / khoảng trống nguồn cũng bằng anti-join broadcast, không dựng biểu thức
+OR theo từng mục.

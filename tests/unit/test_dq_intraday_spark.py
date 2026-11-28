@@ -379,6 +379,193 @@ def test_known_period_stats(spark):
     assert gap["bars_per_day"]["days_with_data"] == 0
 
 
+def _multi_periods():
+    from stocklake.dq.notes import KnownPeriod
+
+    # Thứ tự cố ý không theo mã: kết quả phải theo thứ tự này.
+    return (
+        KnownPeriod("Q", DAYS[3], None, "sau"),
+        KnownPeriod("P", None, DAYS[1], "truoc_chuyen_san"),
+        KnownPeriod("R", DAYS[0], DAYS[4], "khong_co_nen"),  # R không có nến phút nào
+        KnownPeriod("P", DAYS[2], DAYS[3], "khoang_trong_chuyen_san"),
+    )
+
+
+def _multi_rows():
+    # _period_rows + Q: 30 nến/ngày cả 5 ngày, từ 14:50 giờ VN (07:50 UTC) -> 14:50..15:19.
+    return _period_rows() + [b for d in DAYS for b in bars("Q", d, 30, hhmm=(7, 50))]
+
+
+def test_known_period_stats_many_periods_one_pass(spark):
+    from stocklake.dq.checks.intraday_completeness import (
+        intraday_calendar_days,
+        known_period_stats,
+    )
+
+    df = intraday(spark, _multi_rows())
+    days = intraday_calendar_days(df, calendar(spark), daily(spark, daily_for(["A", "P", "Q"])))
+    cov = days.filter("expected")
+    q, pre, r, gap = known_period_stats(cov, df, _multi_periods(), calendar_days_df=days)
+    assert [x["label"] for x in (q, pre, r, gap)] == [
+        "sau",
+        "truoc_chuyen_san",
+        "khong_co_nen",
+        "khoang_trong_chuyen_san",
+    ]
+    # Q từ DAYS[3]: 2 ngày kỳ vọng x 30 nến; 300 cổ phiếu phút vs BIG ngày -> thưa
+    assert (q["symbol"], q["start"], q["end"]) == ("Q", "2026-01-08", None)
+    assert (q["expected_days"], q["thin_days"], q["low_bar_days"], q["calendar_days"]) == (
+        2,
+        2,
+        2,
+        2,
+    )
+    assert q["bars_per_day"] == {
+        "days_with_data": 2,
+        "min": 30,
+        "p5": 30.0,
+        "p50": 30.0,
+        "p95": 30.0,
+        "max": 30,
+    }
+    assert q["bars"] == 60
+    # phút 14:50..15:19: > 15:00 là 15:01..15:19 = 19 nến/ngày; > 14:45 là cả 30
+    assert q["bars_outside_0900_1500_vn"] == 38 and q["bars_after_1445_vn"] == 60
+    assert q["bars_before_0915_vn"] == 0 and q["bars_lunch_1130_1300_vn"] == 0
+    # P trước chuyển sàn: 2 ngày x 20 nến từ 08:50 -> 10 nến/ngày trước 09:00
+    assert (pre["expected_days"], pre["thin_days"], pre["calendar_days"]) == (2, 2, 2)
+    assert pre["bars_per_day"]["min"] == 20 and pre["bars_per_day"]["p50"] == 20.0
+    assert pre["bars"] == 40 and pre["bars_outside_0900_1500_vn"] == 20
+    assert pre["bars_before_0915_vn"] == 40 and pre["bars_after_1445_vn"] == 0
+    # P khoảng trống: 2 ngày kỳ vọng không có nến (volume ngày BIG ở mọi ngày)
+    assert (gap["expected_days"], gap["thin_days"], gap["low_bar_days"]) == (2, 0, 0)
+    assert gap["calendar_days"] == 2 and gap["bars"] == 0
+    assert gap["bars_per_day"] == {
+        "days_with_data": 0,
+        "min": None,
+        "p5": None,
+        "p50": None,
+        "p95": None,
+        "max": None,
+    }
+    # R: không có dòng nào -> toàn 0 / None, vẫn có mặt đúng vị trí
+    assert (r["expected_days"], r["calendar_days"], r["bars"]) == (0, 0, 0)
+    assert r["bars_per_day"]["days_with_data"] == 0 and r["bars_per_day"]["p50"] is None
+    # không truyền calendar_days_df: không có khoá calendar_days
+    assert "calendar_days" not in known_period_stats(cov, df, _multi_periods())[0]
+    # start/end chỉ cắt phần quét nến phút
+    cut = known_period_stats(cov, df, _multi_periods(), start=DAYS[4])
+    assert [x["bars"] for x in cut] == [30, 0, 0, 0]
+    # chỉ mã A (không có giai đoạn): không đếm nến nào
+    only_a = known_period_stats(cov, df, _multi_periods(), symbols=["A"])
+    assert [x["bars"] for x in only_a] == [0, 0, 0, 0]
+
+
+def test_known_period_stats_without_periods_runs_nothing(spark):
+    from stocklake.dq.checks.intraday_completeness import known_period_stats
+
+    df = intraday(spark, _period_rows())
+    assert known_period_stats(cov_df(spark, _period_rows()), df, ()) == []
+
+
+def test_exclude_known_periods_join_matches_or_condition(spark):
+    from stocklake.dq.checks.intraday_completeness import (
+        PERIOD_ID,
+        exclude_known_periods,
+        intraday_calendar_days,
+        known_periods_df,
+        period_condition,
+        tag_known_periods,
+    )
+
+    df = intraday(spark, _multi_rows())
+    days = intraday_calendar_days(df, calendar(spark), daily(spark, daily_for(["A", "P", "Q"])))
+    periods = _multi_periods()
+    via_join = exclude_known_periods(days, periods).collect()
+    via_or = days.filter(~period_condition(periods)).collect()
+    assert sorted(via_join) == sorted(via_or)
+    # A 5 ngày + P DAYS[4] + Q DAYS[0..2]
+    assert sorted((r["symbol"], r["trade_date"]) for r in via_join) == sorted(
+        [("A", d) for d in DAYS] + [("P", DAYS[4])] + [("Q", d) for d in DAYS[:3]]
+    )
+    assert exclude_known_periods(days, ()).count() == days.count()
+    # gắn nhãn không nhân dòng; chỉ số = vị trí trong danh sách
+    tagged = tag_known_periods(days, known_periods_df(spark, periods)).collect()
+    assert len(tagged) == days.count()
+    got = {(r["symbol"], r["trade_date"]): r[PERIOD_ID] for r in tagged}
+    assert got[("Q", DAYS[4])] == 0 and got[("P", DAYS[0])] == 1
+    assert got[("P", DAYS[3])] == 3 and got[("P", DAYS[4])] is None
+    assert got[("A", DAYS[0])] is None
+
+
+def _gap_rows():
+    # G có nến DAYS[0], DAYS[2], DAYS[4] (100 nến x 10 = 1.000 = volume ngày); A đủ 5 ngày.
+    return [b for d in DAYS for b in bars("A", d, 100)] + [
+        b for d in (DAYS[0], DAYS[2], DAYS[4]) for b in bars("G", d, 100)
+    ]
+
+
+def _gap_daily():
+    return [("A", d, 1000) for d in DAYS] + [("G", d, 1000) for d in DAYS]
+
+
+def test_exclude_known_source_gaps(spark):
+    from stocklake.dq.checks.intraday_completeness import (
+        exclude_known_periods,
+        exclude_known_source_gaps,
+        source_gap_stats,
+        summarize_completeness,
+    )
+    from stocklake.dq.notes import KnownPeriod
+
+    cov = cov_df(spark, _gap_rows(), _gap_daily())
+    head = by_name(summarize_completeness(cov))
+    # 10 ngày kỳ vọng, G thiếu DAYS[1], DAYS[3]
+    assert head["intraday_day_coverage_ratio"].metric_value == pytest.approx(8 / 10)
+    assert head["intraday_symbol_coverage_ratio_min"].metric_value == pytest.approx(3 / 5)
+
+    both = [("G", DAYS[1]), ("G", DAYS[3])]
+    res = by_name(summarize_completeness(exclude_known_source_gaps(cov, both)))
+    assert res["intraday_day_coverage_ratio"].metric_value == 1.0
+    assert res["intraday_days_missing"].metric_value == 0.0
+    assert res["intraday_symbol_coverage_ratio_min"].metric_value == 1.0
+    assert source_gap_stats(cov, both) == {
+        "symbols": 1,
+        "days": 2,
+        "expected_days": 2,
+        "expected_missing_days": 2,
+    }
+
+    # G DAYS[2] có nến (vẫn bị loại nếu ghi chú ghi); X không có trong dữ liệu
+    mixed = [("G", DAYS[1]), ("G", DAYS[2]), ("X", DAYS[0])]
+    left = exclude_known_source_gaps(cov, mixed)
+    res = by_name(summarize_completeness(left))
+    assert left.count() == 8
+    assert res["intraday_day_coverage_ratio"].metric_value == pytest.approx(7 / 8)
+    assert res["intraday_days_missing"].metric_value == 1.0
+    assert source_gap_stats(cov, mixed) == {
+        "symbols": 2,
+        "days": 3,
+        "expected_days": 2,
+        "expected_missing_days": 1,
+    }
+
+    # kết hợp với giai đoạn đã biết: G DAYS[3] do khoảng trống nguồn, G DAYS[1] do giai đoạn
+    period = (KnownPeriod("G", DAYS[1], DAYS[1], "x"),)
+    combo = exclude_known_source_gaps(exclude_known_periods(cov, period), [("G", DAYS[3])])
+    assert by_name(summarize_completeness(combo))["intraday_day_coverage_ratio"].metric_value == 1.0
+    assert combo.count() == 8
+
+    # không có khoảng trống nào: giữ nguyên, thống kê 0, không chạy action
+    assert exclude_known_source_gaps(cov, []) is cov
+    assert source_gap_stats(cov, []) == {
+        "symbols": 0,
+        "days": 0,
+        "expected_days": 0,
+        "expected_missing_days": 0,
+    }
+
+
 def test_worst_lists_flag_known_period_and_anomaly(spark):
     from stocklake.dq.checks._util import rows_to_dicts
     from stocklake.dq.checks.intraday_completeness import thinnest_days
@@ -665,9 +852,51 @@ def test_runner_without_known_periods_reports_same_numbers(spark, monkeypatch):
     rep = _run_runner(spark, monkeypatch, DqNotes())
     cov = next(c for c in rep["results"] if c["check_name"] == "intraday_day_coverage_ratio")
     assert cov["basis"] == "excluding_known_periods" and rep["known_periods_excluded"] == 0
+    assert rep["known_source_gaps_excluded"] == {
+        "symbols": 0,
+        "days": 0,
+        "expected_days": 0,
+        "expected_missing_days": 0,
+    }
+    assert rep["known_period_stats"] == [] and rep["notes"]["known_source_gaps"] == []
     assert cov["metric"] == pytest.approx(8 / 10)
     assert cov["reference_all_data"]["metric"] == cov["metric"]
     assert cov["passed"] is False and rep["passed"] is False
+
+
+def test_runner_verdict_excludes_known_source_gaps(spark, monkeypatch):
+    from stocklake.dq.notes import DqNotes, KnownSourceGap
+
+    gap = KnownSourceGap("G", (DAYS[1], DAYS[3]), "nguon_khong_co_nen_phut")
+    rep = _run_runner(
+        spark, monkeypatch, DqNotes(known_source_gaps=(gap,)), _gap_rows(), _gap_daily()
+    )
+    checks = {c["check_name"]: c for c in rep["results"]}
+    cov = checks["intraday_day_coverage_ratio"]
+    assert cov["basis"] == "excluding_known_periods"
+    assert cov["metric"] == 1.0 and cov["passed"] is True
+    assert cov["reference_all_data"] == {"metric": pytest.approx(8 / 10), "passed": False}
+    sym = checks["intraday_symbol_coverage_ratio_min"]
+    assert sym["metric"] == 1.0 and sym["reference_all_data"]["symbol"] == "G"
+    assert sym["reference_all_data"]["metric"] == pytest.approx(3 / 5)
+    assert checks["intraday_days_missing"]["metric"] == 0.0
+    assert checks["intraday_days_missing"]["reference_all_data"]["metric"] == 2.0
+    assert rep["known_periods_excluded"] == 0 and rep["known_period_stats"] == []
+    assert rep["known_source_gaps_excluded"] == {
+        "symbols": 1,
+        "days": 2,
+        "expected_days": 2,
+        "expected_missing_days": 2,
+    }
+    assert rep["excluding_known_periods"]["source_gap_days_excluded"] == 2
+    assert rep["notes"]["known_source_gaps"][0]["dates"] == ["2026-01-06", "2026-01-08"]
+    # danh sách theo mã (toàn bộ dữ liệu) vẫn có G, kèm nhãn khoảng trống nguồn
+    (miss,) = rep["missing_days_by_symbol"]
+    assert (miss["symbol"], miss["missing_days"]) == ("G", 2)
+    assert miss["note"] == "nguon_khong_co_nen_phut"
+    # legacy cũng bỏ các cặp này như bộ kết luận: G còn 3/3 ngày lịch
+    assert rep["legacy_rules"]["day_coverage_ratio"] == 1.0
+    assert rep["passed"] is True
 
 
 def test_runner_waits_for_executors_before_taking_read_locks(spark, monkeypatch):

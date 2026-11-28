@@ -4,7 +4,8 @@ Python thuần, không import pyspark.
 
 Check có hai bộ số (toàn bộ dữ liệu; bộ loại trừ) thì ĐẠT/KHÔNG ĐẠT tính trên bộ loại trừ. Bộ số
 toàn bộ dữ liệu vẫn được tính và ghi, chỉ để tham khảo. Bộ loại trừ tuỳ check (`basis`):
-- check đầy đủ ngày: bỏ giai đoạn đã biết (`excluding_known_periods`);
+- check đầy đủ ngày: bỏ giai đoạn đã biết và khoảng trống nguồn đã biết (`known_source_gaps`,
+  từ 28/11/2026) — tên basis vẫn là `excluding_known_periods`;
 - `intraday_volume_days_minute_gt_daily` (từ 28/11/2026): bỏ các ngày bất thường đánh dấu
   `exclude_from: [volume_minute_gt_daily]` trong dq_notes (`excluding_known_anomalies`).
 
@@ -30,7 +31,8 @@ BASIS_EXCL_ANOMALIES = "excluding_known_anomalies"
 BASIS_ALL = "all_data"
 VERDICT_RULE = (
     "Check có bộ số loại trừ (conf/app/dq_notes.yaml): đạt/không đạt tính trên bộ loại trừ — "
-    "check đầy đủ ngày bỏ giai đoạn đã biết (basis=excluding_known_periods); "
+    "check đầy đủ ngày bỏ giai đoạn đã biết (known_periods) và các (mã, ngày) khoảng trống đã "
+    "biết của nguồn (known_source_gaps) (basis=excluding_known_periods); "
     "intraday_volume_days_minute_gt_daily bỏ các ngày bất thường đánh dấu "
     "exclude_from: [volume_minute_gt_daily] (basis=excluding_known_anomalies). Bộ số toàn bộ dữ "
     "liệu (reference_all_data) chỉ để tham khảo. Check còn lại tính trên toàn bộ dữ liệu "
