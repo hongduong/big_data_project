@@ -1,13 +1,19 @@
-"""Quy tắc đạt/không đạt của DQ nến phút (duyệt 24/11/2026). Python thuần, không import pyspark.
+"""Quy tắc đạt/không đạt của DQ nến phút (duyệt 24/11/2026, mở rộng 28/11/2026).
 
-Check có hai bộ số (toàn bộ dữ liệu; bỏ giai đoạn đã biết) thì ĐẠT/KHÔNG ĐẠT tính trên bộ số
-bỏ giai đoạn đã biết. Bộ số toàn bộ dữ liệu vẫn được tính và ghi, chỉ để tham khảo.
+Python thuần, không import pyspark.
+
+Check có hai bộ số (toàn bộ dữ liệu; bộ loại trừ) thì ĐẠT/KHÔNG ĐẠT tính trên bộ loại trừ. Bộ số
+toàn bộ dữ liệu vẫn được tính và ghi, chỉ để tham khảo. Bộ loại trừ tuỳ check (`basis`):
+- check đầy đủ ngày: bỏ giai đoạn đã biết (`excluding_known_periods`);
+- `intraday_volume_days_minute_gt_daily` (từ 28/11/2026): bỏ các ngày bất thường đánh dấu
+  `exclude_from: [volume_minute_gt_daily]` trong dq_notes (`excluding_known_anomalies`).
 
 Đặt tên trong `dq_report.check_name` (từ 24/11/2026):
-- `<check>`            : dòng KẾT LUẬN — metric và passed tính trên bộ số bỏ giai đoạn đã biết;
+- `<check>`            : dòng KẾT LUẬN — metric và passed tính trên bộ loại trừ;
 - `<check>__all_data`  : dòng THAM KHẢO — cùng ngưỡng, tính trên toàn bộ dữ liệu; `passed` chỉ là
                          so sánh ngưỡng, không quyết định kết luận;
-- check không có biến thể (volume, ngày ngoài lịch): giữ tên `<check>`, tính trên toàn bộ dữ liệu.
+- check không có biến thể (volume khác, ngày ngoài lịch, ngày sau nến cuối): giữ tên `<check>`,
+  tính trên toàn bộ dữ liệu.
 """
 
 from __future__ import annotations
@@ -20,11 +26,14 @@ from stocklake.dq.checks import CheckResult
 
 ALL_DATA_SUFFIX = "__all_data"
 BASIS_EXCL = "excluding_known_periods"
+BASIS_EXCL_ANOMALIES = "excluding_known_anomalies"
 BASIS_ALL = "all_data"
 VERDICT_RULE = (
-    "Check có bộ số bỏ giai đoạn đã biết (conf/app/dq_notes.yaml): đạt/không đạt tính trên bộ số "
-    "bỏ giai đoạn đã biết (basis=excluding_known_periods); bộ số toàn bộ dữ liệu "
-    "(reference_all_data) chỉ để tham khảo. Check còn lại tính trên toàn bộ dữ liệu "
+    "Check có bộ số loại trừ (conf/app/dq_notes.yaml): đạt/không đạt tính trên bộ loại trừ — "
+    "check đầy đủ ngày bỏ giai đoạn đã biết (basis=excluding_known_periods); "
+    "intraday_volume_days_minute_gt_daily bỏ các ngày bất thường đánh dấu "
+    "exclude_from: [volume_minute_gt_daily] (basis=excluding_known_anomalies). Bộ số toàn bộ dữ "
+    "liệu (reference_all_data) chỉ để tham khảo. Check còn lại tính trên toàn bộ dữ liệu "
     "(basis=all_data). passed tổng = mọi check đều đạt."
 )
 
@@ -45,17 +54,19 @@ def build_verdict(
     variant_excl: Sequence[CheckResult],
     single: Sequence[CheckResult],
     group_of: Callable[[str], str],
+    basis_of: Callable[[str], str] | None = None,
 ) -> Verdict:
     """Ghép các bộ số thành kết luận.
 
     `variant_all` / `variant_excl`: cùng danh sách check (tên thường, không hậu tố), lần lượt
-    trên toàn bộ dữ liệu và bỏ giai đoạn đã biết (hai bộ giống hệt nhau khi không có giai đoạn
-    nào). `single`: check không có biến thể. `group_of(check_name)` trả nhóm báo cáo.
+    trên toàn bộ dữ liệu và trên bộ loại trừ (hai bộ giống hệt nhau khi không có gì để loại).
+    `single`: check không có biến thể. `group_of(check_name)` trả nhóm báo cáo.
+    `basis_of(check_name)` trả tên bộ loại trừ của check có biến thể (mặc định BASIS_EXCL).
     """
     excl = {r.check_name: r for r in variant_excl}
     missing = [r.check_name for r in variant_all if r.check_name not in excl]
     if missing:
-        raise ValueError(f"Thiếu bộ số bỏ giai đoạn đã biết cho: {missing}")
+        raise ValueError(f"Thiếu bộ số loại trừ cho: {missing}")
     rows: list[CheckResult] = []
     checks: list[dict[str, Any]] = []
     for ref in variant_all:
@@ -69,7 +80,7 @@ def build_verdict(
                 "metric": verdict.metric_value,
                 "threshold": verdict.threshold,
                 "passed": bool(verdict.passed),
-                "basis": BASIS_EXCL,
+                "basis": basis_of(verdict.check_name) if basis_of else BASIS_EXCL,
                 "reference_all_data": _ref_json(ref),
             }
         )

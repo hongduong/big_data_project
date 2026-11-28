@@ -2,6 +2,8 @@
 
 Ghi chú là DỮ LIỆU, không lọc gì ở raw/clean. Runner dùng chúng để:
 - tính bộ số bỏ các giai đoạn đã biết, dùng làm kết luận đạt/không đạt (stocklake.dq.verdict);
+- tính bộ số bỏ các ngày bất thường được đánh dấu `exclude_from: [<kiểm tra>]` khỏi kiểm tra đó
+  (hiện chỉ có `volume_minute_gt_daily`); ngày không có trường này không bị loại khỏi kiểm tra nào;
 - gắn `note` vào các dòng xấu nhất rơi vào giai đoạn / ngày đã biết.
 Python thuần, không import pyspark.
 """
@@ -18,6 +20,9 @@ from stocklake.common.logging import get_logger
 log = get_logger(__name__)
 
 CONF_NAME = "dq_notes"
+# Giá trị hợp lệ của `known_anomalies[].exclude_from`: kiểm tra cứng mà ngày đó bị loại khỏi.
+EXCLUDE_VOLUME_MINUTE_GT_DAILY = "volume_minute_gt_daily"
+EXCLUDE_TARGETS = frozenset({EXCLUDE_VOLUME_MINUTE_GT_DAILY})
 
 
 @dataclass(frozen=True)
@@ -38,13 +43,18 @@ class KnownPeriod:
 
 @dataclass(frozen=True)
 class KnownAnomaly:
-    """Ngày bất thường đã biết; `symbols` rỗng = toàn thị trường."""
+    """Ngày bất thường đã biết; `symbols` rỗng = toàn thị trường.
+
+    `exclude_from`: các kiểm tra cứng (EXCLUDE_TARGETS) bỏ ngày này khỏi bộ số kết luận; rỗng =
+    chỉ là ghi chú, không loại trừ gì.
+    """
 
     date: date
     label: str
     note: str = ""
     status: str = ""
     symbols: tuple[str, ...] = ()
+    exclude_from: tuple[str, ...] = ()
 
     def contains(self, symbol: str, day: date) -> bool:
         return day == self.date and (not self.symbols or symbol in self.symbols)
@@ -55,6 +65,10 @@ class DqNotes:
     known_periods: tuple[KnownPeriod, ...] = ()
     known_anomalies: tuple[KnownAnomaly, ...] = ()
     source: str | None = field(default=None, compare=False)
+
+    def anomalies_excluded_from(self, target: str) -> tuple[KnownAnomaly, ...]:
+        """Các ngày bất thường đánh dấu `exclude_from` chứa `target`."""
+        return tuple(a for a in self.known_anomalies if target in a.exclude_from)
 
     def labels_for(self, symbol: str | None, day: date | None) -> list[str]:
         """Nhãn của các giai đoạn / ngày bất thường chứa (symbol, day).
@@ -77,7 +91,8 @@ class DqNotes:
             "source": self.source,
             "known_periods": [enc(asdict(p)) for p in self.known_periods],
             "known_anomalies": [
-                enc({**asdict(a), "symbols": list(a.symbols)}) for a in self.known_anomalies
+                enc({**asdict(a), "symbols": list(a.symbols), "exclude_from": list(a.exclude_from)})
+                for a in self.known_anomalies
             ],
         }
 
@@ -111,6 +126,12 @@ def _text(v: Any, where: str, required: bool = False) -> str:
     if not isinstance(v, str) or (required and not v.strip()):
         raise ValueError(f"{where}: cần chuỗi không rỗng ({v!r})")
     return v.strip()
+
+
+def _exclude_target(v: Any, where: str) -> str:
+    if not isinstance(v, str) or v not in EXCLUDE_TARGETS:
+        raise ValueError(f"{where}: {v!r} không hợp lệ (cần một trong {sorted(EXCLUDE_TARGETS)})")
+    return v
 
 
 def _list(v: Any, where: str) -> list[Any]:
@@ -147,6 +168,10 @@ def parse_notes(conf: Mapping[str, Any] | None, source: str | None = None) -> Dq
         if not isinstance(e, Mapping):
             raise ValueError(f"{w}: phải là mapping")
         syms = tuple(_symbol(s, f"{w}.symbols") for s in _list(e.get("symbols"), f"{w}.symbols"))
+        excl = tuple(
+            _exclude_target(t, f"{w}.exclude_from")
+            for t in _list(e.get("exclude_from"), f"{w}.exclude_from")
+        )
         anomalies.append(
             KnownAnomaly(
                 date=_date(e.get("date"), f"{w}.date"),  # type: ignore[arg-type]
@@ -154,6 +179,7 @@ def parse_notes(conf: Mapping[str, Any] | None, source: str | None = None) -> Dq
                 note=_text(e.get("note"), f"{w}.note"),
                 status=_text(e.get("status"), f"{w}.status"),
                 symbols=syms,
+                exclude_from=excl,
             )
         )
     return DqNotes(tuple(periods), tuple(anomalies), source)

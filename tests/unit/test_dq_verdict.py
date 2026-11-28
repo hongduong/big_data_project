@@ -11,6 +11,7 @@ from stocklake.dq.verdict import (
     ALL_DATA_SUFFIX,
     BASIS_ALL,
     BASIS_EXCL,
+    BASIS_EXCL_ANOMALIES,
     VERDICT_RULE,
     build_verdict,
 )
@@ -111,6 +112,91 @@ def test_json_serialisable_and_rule_text():
     v = build_verdict(ALL, EXCL, SINGLE, group_of)
     json.dumps(v.checks)
     assert "excluding_known_periods" in VERDICT_RULE and "all_data" in VERDICT_RULE
+    assert "excluding_known_anomalies" in VERDICT_RULE
+    assert "intraday_volume_days_minute_gt_daily" in VERDICT_RULE
+    assert "volume_minute_gt_daily" in VERDICT_RULE
+
+
+# ------------------------------------------------------------ volume phút > ngày (28/11/2026)
+
+GT = "intraday_volume_days_minute_gt_daily"
+
+
+def basis_of(name):
+    return BASIS_EXCL_ANOMALIES if name == GT else BASIS_EXCL
+
+
+def test_minute_gt_daily_verdict_on_set_without_marked_days():
+    # 47 ngày phút > ngày trên toàn bộ dữ liệu, 0 khi bỏ các ngày đánh dấu exclude_from
+    v = build_verdict(
+        [*ALL, r(GT, 47.0, 0.0, False)],
+        [*EXCL, r(GT, 0.0, 0.0, True)],
+        SINGLE,
+        group_of,
+        basis_of=basis_of,
+    )
+    assert v.passed is True
+    gt = next(c for c in v.checks if c["check_name"] == GT)
+    assert gt["basis"] == BASIS_EXCL_ANOMALIES == "excluding_known_anomalies"
+    assert gt["group"] == "cross_source" and gt["metric"] == 0.0 and gt["passed"] is True
+    assert gt["reference_all_data"] == {"metric": 47.0, "passed": False}
+    thin = next(c for c in v.checks if c["check_name"] == "intraday_thin_day_share")
+    assert thin["basis"] == BASIS_EXCL
+    by = {row.check_name: row for row in v.rows}
+    assert by[GT].metric_value == 0.0 and by[GT].passed
+    assert by[GT + ALL_DATA_SUFFIX].metric_value == 47.0 and not by[GT + ALL_DATA_SUFFIX].passed
+
+
+def test_minute_gt_daily_outside_marked_days_fails_overall():
+    v = build_verdict(
+        [*ALL, r(GT, 48.0, 0.0, False)],
+        [*EXCL, r(GT, 1.0, 0.0, False)],
+        SINGLE,
+        group_of,
+        basis_of=basis_of,
+    )
+    assert v.passed is False
+
+
+def test_default_basis_without_basis_of_is_known_periods():
+    v = build_verdict([*ALL, r(GT, 1.0, 0.0, False)], [*EXCL, r(GT, 0.0, 0.0, True)], [], group_of)
+    assert {c["basis"] for c in v.checks} == {BASIS_EXCL}
+
+
+def test_default_thresholds_and_rule_constants():
+    """Hằng số ngưỡng (đọc được không cần Spark)."""
+    from stocklake.dq.checks import intraday_completeness as comp
+    from stocklake.dq.checks import intraday_volume as vol
+
+    assert comp.MIN_DAILY_VOLUME_FOR_EXPECTED_DAY == 100
+    assert (comp.DEFAULT_MIN_COVERAGE_RATIO, comp.DEFAULT_MIN_SYMBOL_COVERAGE_RATIO) == (
+        0.998,
+        0.98,
+    )
+    assert comp.DEFAULT_MIN_BARS_PER_DAY == 100
+    assert (comp.DEFAULT_THIN_MIN_GAP_RATIO, comp.DEFAULT_THIN_MIN_GAP_SHARES) == (0.01, 1000)
+    assert comp.DEFAULT_MAX_THIN_DAY_SHARE == 0.01
+    assert (vol.DEFAULT_TOLERANCE, vol.DEFAULT_MATCH_ABS_DIFF_SHARES) == (0.01, 1000)
+    assert vol.DEFAULT_MIN_MATCH_RATIO == 0.99 and vol.DEFAULT_MAX_DAYS_MINUTE_GT_DAILY == 0
+    assert vol.MINUTE_GT_DAILY == GT
+    assert comp.AFTER_LAST_BAR == "intraday_days_daily_volume_after_last_bar"
+
+
+def test_runner_thresholds_and_basis():
+    from stocklake.dq import intraday as dq
+
+    th = dq._thresholds()
+    assert th["min_coverage_ratio"] == 0.998 and th["min_symbol_coverage_ratio"] == 0.98
+    assert th["min_daily_volume_expected_day"] == 100
+    assert (th["thin_min_gap_ratio"], th["thin_min_gap_shares"]) == (0.01, 1000)
+    assert th["max_thin_day_share"] == 0.01 and th["min_bars_per_day"] == 100
+    assert (th["volume_tolerance"], th["volume_match_abs_diff_shares"]) == (0.01, 1000)
+    assert th["min_volume_match_ratio"] == 0.99 and th["max_volume_abs_diff_p95"] == 0.01
+    assert th["max_days_minute_gt_daily"] == 0
+    assert dq._basis_of(GT) == BASIS_EXCL_ANOMALIES
+    assert dq._basis_of("intraday_thin_day_share") == BASIS_EXCL
+    assert dq._group_of(GT) == "cross_source"
+    assert dq._group_of("intraday_days_daily_volume_after_last_bar") == "completeness"
 
 
 # ------------------------------------------------------------ khoá đọc
