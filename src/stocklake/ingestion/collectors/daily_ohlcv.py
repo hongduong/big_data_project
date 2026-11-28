@@ -54,6 +54,8 @@ from stocklake.sources.base import DailyBar, SourceClient, SourceError
 
 log = get_logger(__name__)
 
+BULK_MAX_PER_SECOND = 1.0  # tốc độ gọi nguồn mặc định của job nến ngày
+
 NAME = "daily_ohlcv"
 DEFAULT_STATE_DIR = "/var/lib/stocklake/state"
 STATE_FILE = "ingestion_state.json"
@@ -476,7 +478,11 @@ def _run(
         from stocklake.sources.vci import VciClient
         from stocklake.sources.vndirect import VndirectClient
 
-        sources = [VciClient(), VndirectClient()]
+        # Tải hàng loạt: 1 request/giây cho mỗi nguồn (quyết định 3), như collector nến phút.
+        sources = [
+            VciClient(max_per_second=BULK_MAX_PER_SECOND),
+            VndirectClient(max_per_second=BULK_MAX_PER_SECOND),
+        ]
     missing = sorted({s.strip().upper() for s in refetch_all_years} - set(symbols) - {""})
     if missing:
         log.warning(
