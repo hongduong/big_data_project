@@ -1,12 +1,16 @@
 # Ghi chú riêng cho DQ nến phút (stocklake.dq.notes, đọc qua load_app_conf("dq_notes")).
 # Đây là DỮ LIỆU: không lọc gì ở raw/clean. Báo cáo DQ dùng để:
-#   - tính thêm khối `excluding_known_periods` (bỏ các giai đoạn dưới đây, gồm cả ngày trống);
+#   - tính bộ số kết luận của phần đầy đủ ngày (`basis: excluding_known_periods`): bỏ các giai
+#     đoạn `known_periods` (gồm cả ngày trống) VÀ các (mã, ngày) `known_source_gaps`;
 #   - bỏ các ngày bất thường có `exclude_from` khỏi bộ số kết luận của kiểm tra cứng tương ứng
 #     (bộ số toàn bộ dữ liệu vẫn ghi ở `reference_all_data` / `<check>__all_data`);
-#   - gắn `note` vào các dòng xấu nhất rơi vào giai đoạn / ngày đã biết.
+#   - gắn `note` vào các dòng xấu nhất rơi vào giai đoạn / khoảng trống nguồn / ngày đã biết.
 # Định dạng:
 #   known_periods:   symbol (viết hoa), start/end (YYYY-MM-DD, start null = từ đầu dữ liệu),
-#                    label, note
+#                    label, note; hai giai đoạn của cùng mã không được chồng nhau
+#   known_source_gaps: symbol (viết hoa), dates (danh sách YYYY-MM-DD, không rỗng; mỗi (mã, ngày)
+#                    chỉ xuất hiện một lần), label, note — ngày nguồn không có nến phút (đã gọi
+#                    lại nguồn kiểm chứng); bị loại khỏi bộ số kết luận của phần đầy đủ ngày
 #   known_anomalies: date (YYYY-MM-DD), symbols (rỗng = toàn thị trường), label, note, status,
 #                    exclude_from (tuỳ chọn, mặc định rỗng = không loại khỏi kiểm tra nào;
 #                    giá trị hợp lệ: volume_minute_gt_daily — loại khỏi kiểm tra cứng
@@ -48,6 +52,359 @@ known_periods:
     note: >-
       Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong các phiên này,
       ngay trước khi nến theo mẫu HOSE từ 2025-12-25. Dữ liệu giữ nguyên ở raw và clean.
+  # 26 mã ngoài VN30 có dấu hiệu chuyển sàn giống BSR/MCH (rà 28/11/2026 trên clean/intraday_1m); ECO và HNA bằng chứng yếu hơn
+  - symbol: GDA
+    start: null
+    end: 2026-10-28
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 710/781 ngày có nến tới 2026-10-28, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: GDA
+    start: 2026-10-29
+    end: 2026-11-11
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 10 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-11-12. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: BVB
+    start: null
+    end: 2026-07-08
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 699/704 ngày có nến tới 2026-07-08, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: BVB
+    start: 2026-07-09
+    end: 2026-07-20
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 8 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-07-21. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: AFX
+    start: null
+    end: 2025-11-27
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 520/555 ngày có nến tới 2025-11-27, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: AFX
+    start: 2025-11-28
+    end: 2025-12-05
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 6 phiên này, ngay trước khi nến theo mẫu HOSE từ 2025-12-08. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VBB
+    start: null
+    end: 2026-06-29
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 507/691 ngày có nến tới 2026-06-29, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VBB
+    start: 2026-06-30
+    end: 2026-07-13
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 10 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-07-14. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: HIO
+    start: null
+    end: 2026-11-05
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 485/735 ngày có nến tới 2026-11-05, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: HIO
+    start: 2026-11-06
+    end: 2026-11-13
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 6 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-11-16. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: KLB
+    start: null
+    end: 2026-01-06
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 480/581 ngày có nến tới 2026-01-06, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: KLB
+    start: 2026-01-07
+    end: 2026-01-14
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 6 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-01-15. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VAB
+    start: null
+    end: 2025-07-09
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 454/456 ngày có nến tới 2025-07-09, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VAB
+    start: 2025-07-10
+    end: 2025-07-21
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 8 phiên này, ngay trước khi nến theo mẫu HOSE từ 2025-07-22. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: NTC
+    start: null
+    end: 2025-10-15
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 446/523 ngày có nến tới 2025-10-15, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: NTC
+    start: 2025-10-16
+    end: 2025-10-27
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 8 phiên này, ngay trước khi nến theo mẫu HOSE từ 2025-10-28. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: ANT
+    start: null
+    end: 2026-01-12
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 421/581 ngày có nến tới 2026-01-12, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: ANT
+    start: 2026-01-13
+    end: 2026-01-19
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 5 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-01-20. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: PDV
+    start: null
+    end: 2025-11-05
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 387/538 ngày có nến tới 2025-11-05, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: PDV
+    start: 2025-11-06
+    end: 2025-11-18
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 9 phiên này, ngay trước khi nến theo mẫu HOSE từ 2025-11-19. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: MZG
+    start: null
+    end: 2026-06-19
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 384/397 ngày có nến tới 2026-06-19, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: MZG
+    start: 2026-06-22
+    end: 2026-07-01
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 8 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-07-02. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: GHC
+    start: null
+    end: 2026-01-16
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 331/589 ngày có nến tới 2026-01-16, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: GHC
+    start: 2026-01-19
+    end: 2026-01-29
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 9 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-01-30. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: DSC
+    start: null
+    end: 2024-10-14
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 273/274 ngày có nến tới 2024-10-14, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: DSC
+    start: 2024-10-15
+    end: 2024-10-23
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 7 phiên này, ngay trước khi nến theo mẫu HOSE từ 2024-10-24. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: TAL
+    start: null
+    end: 2025-07-21
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 259/376 ngày có nến tới 2025-07-21, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: TAL
+    start: 2025-07-22
+    end: 2025-07-31
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 8 phiên này, ngay trước khi nến theo mẫu HOSE từ 2025-08-01. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: TSA
+    start: null
+    end: 2025-12-25
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 229/360 ngày có nến tới 2025-12-25, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: TSA
+    start: 2025-12-26
+    end: 2026-01-06
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 6 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-01-07. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: DSH
+    start: null
+    end: 2026-10-15
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 228/344 ngày có nến tới 2026-10-15, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: DSH
+    start: 2026-10-16
+    end: 2026-10-23
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 6 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-10-26. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: BMJ
+    start: null
+    end: 2026-11-05
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 172/447 ngày có nến tới 2026-11-05, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: BMJ
+    start: 2026-11-06
+    end: 2026-11-19
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 10 phiên này, ngay trước khi nến theo mẫu HOSE từ 2026-11-20. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: MCM
+    start: null
+    end: 2024-06-13
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 161/189 ngày có nến tới 2024-06-13, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: MCM
+    start: 2024-06-14
+    end: 2024-06-24
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 7 phiên này, ngay trước khi nến theo mẫu HOSE từ 2024-06-25. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VVS
+    start: null
+    end: 2025-11-27
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 138/272 ngày có nến tới 2025-11-27, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VVS
+    start: 2025-11-28
+    end: 2025-12-09
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 8 phiên này, ngay trước khi nến theo mẫu HOSE từ 2025-12-10. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VTP
+    start: null
+    end: 2024-02-29
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 118/118 ngày có nến tới 2024-02-29, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: VTP
+    start: 2024-03-01
+    end: 2024-03-11
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 7 phiên này, ngay trước khi nến theo mẫu HOSE từ 2024-03-12. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: NAB
+    start: null
+    end: 2024-02-28
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 117/117 ngày có nến tới 2024-02-28, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: NAB
+    start: 2024-02-29
+    end: 2024-03-07
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 6 phiên này, ngay trước khi nến theo mẫu HOSE từ 2024-03-08. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: GEE
+    start: null
+    end: 2024-07-18
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 104/213 ngày có nến tới 2024-07-18, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: GEE
+    start: 2024-07-19
+    end: 2024-08-13
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 18 phiên này, ngay trước khi nến theo mẫu HOSE từ 2024-08-14. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: TCI
+    start: null
+    end: 2024-01-12
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 89/89 ngày có nến tới 2024-01-12, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: TCI
+    start: 2024-01-15
+    end: 2024-01-25
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 9 phiên này, ngay trước khi nến theo mẫu HOSE từ 2024-01-26. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: HTG
+    start: null
+    end: 2023-10-30
+    label: truoc_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45 tới 15:00) ở 30/36 ngày có nến tới 2023-10-30, có vẻ là sàn khác trước khi chuyển sang HOSE. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: HTG
+    start: 2023-10-31
+    end: 2023-11-08
+    label: khoang_trong_chuyen_san
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 7 phiên này, ngay trước khi nến theo mẫu HOSE từ 2023-11-09. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: HNA
+    start: null
+    end: 2023-12-22
+    label: truoc_chuyen_san_bang_chung_yeu
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: chỉ 14/63 ngày có nến ngoài mẫu giờ HOSE, đều trong 2023-09-12..2023-12-22. Bằng chứng yếu hơn các mã khác: số ngày ngoài mẫu ít, sau đó có 2 phiên không có nến. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: HNA
+    start: 2023-12-25
+    end: 2023-12-26
+    label: khoang_trong_chuyen_san_bang_chung_yeu
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: không có nến phút trong 2 phiên này, ngay sau ngày ngoài mẫu cuối; bằng chứng yếu hơn các mã khác. Dữ liệu giữ nguyên ở raw và clean.
+  - symbol: ECO
+    start: null
+    end: 2026-08-25
+    label: truoc_chuyen_san_bang_chung_yeu
+    note: >-
+      Suy ra từ dữ liệu, chưa đối chiếu nguồn niêm yết: nến ngoài mẫu giờ HOSE (trước 09:15, sau 14:45) ở 377/443 ngày có nến tới 2026-08-25, sau đó theo mẫu HOSE. Bằng chứng yếu hơn các mã khác: KHÔNG có khoảng trống giữa hai giai đoạn. Dữ liệu giữ nguyên ở raw và clean.
+
+known_source_gaps:
+  # Gọi lại VCI ngày 28/11/2026 cho đúng 66 (mã, ngày) này: nguồn không trả nến phút nào
+  # (7 ngày đối chứng của cùng các mã thì trả đúng), trong khi nến ngày có từ 100 cổ phiếu.
+  - symbol: BTT
+    dates: [2023-10-26, 2023-11-07, 2023-12-07, 2023-12-15]
+    label: nguon_khong_co_nen_phut
+    note: >-
+      Nguồn VCI không có nến phút cho 4 ngày này dù nến ngày có khối lượng từ 100 cổ phiếu
+      (kiểm 28/11/2026). Khoảng trống đã biết của nguồn; dữ liệu giữ nguyên ở raw và clean.
+  - symbol: CLW
+    dates: [2023-09-18, 2023-10-23, 2023-10-25, 2023-11-07, 2023-11-17, 2023-12-14]
+    label: nguon_khong_co_nen_phut
+    note: >-
+      Nguồn VCI không có nến phút cho 6 ngày này dù nến ngày có khối lượng từ 100 cổ phiếu
+      (kiểm 28/11/2026). Khoảng trống đã biết của nguồn; dữ liệu giữ nguyên ở raw và clean.
+  - symbol: COM
+    dates: [2023-10-19, 2023-10-25, 2023-10-27, 2023-10-30, 2023-11-01, 2023-11-02, 2023-11-10, 2023-12-07, 2023-12-15, 2023-12-22, 2024-09-26, 2025-04-01]
+    label: nguon_khong_co_nen_phut
+    note: >-
+      Nguồn VCI không có nến phút cho 12 ngày này dù nến ngày có khối lượng từ 100 cổ phiếu
+      (kiểm 28/11/2026). Khoảng trống đã biết của nguồn; dữ liệu giữ nguyên ở raw và clean.
+  - symbol: DTT
+    dates: [2023-10-16, 2023-11-14, 2023-11-21, 2023-12-01, 2023-12-05, 2023-12-20, 2024-11-20]
+    label: nguon_khong_co_nen_phut
+    note: >-
+      Nguồn VCI không có nến phút cho 7 ngày này dù nến ngày có khối lượng từ 100 cổ phiếu
+      (kiểm 28/11/2026). Khoảng trống đã biết của nguồn; dữ liệu giữ nguyên ở raw và clean.
+  - symbol: LGC
+    dates: [2023-09-18, 2023-11-22, 2023-12-08, 2023-12-20, 2024-06-28, 2025-09-11]
+    label: nguon_khong_co_nen_phut
+    note: >-
+      Nguồn VCI không có nến phút cho 6 ngày này dù nến ngày có khối lượng từ 100 cổ phiếu
+      (kiểm 28/11/2026). Khoảng trống đã biết của nguồn; dữ liệu giữ nguyên ở raw và clean.
+  - symbol: SBV
+    dates: [2023-12-14, 2024-01-08, 2024-07-24, 2024-10-14, 2024-10-16, 2024-10-17, 2024-11-06, 2024-11-22, 2025-02-10, 2025-03-14, 2025-04-01, 2025-04-15, 2025-06-06, 2025-06-25, 2025-07-03, 2025-08-05, 2025-08-28, 2025-09-08, 2025-09-25, 2025-10-28]
+    label: nguon_khong_co_nen_phut
+    note: >-
+      Nguồn VCI không có nến phút cho 20 ngày này dù nến ngày có khối lượng từ 100 cổ phiếu
+      (kiểm 28/11/2026). Khoảng trống đã biết của nguồn; dữ liệu giữ nguyên ở raw và clean.
+  - symbol: SC5
+    dates: [2023-10-16, 2023-10-23, 2023-10-26, 2023-11-06, 2023-11-10, 2023-11-16, 2023-11-27, 2023-11-30, 2023-12-04, 2023-12-05, 2023-12-29]
+    label: nguon_khong_co_nen_phut
+    note: >-
+      Nguồn VCI không có nến phút cho 11 ngày này dù nến ngày có khối lượng từ 100 cổ phiếu
+      (kiểm 28/11/2026). Khoảng trống đã biết của nguồn; dữ liệu giữ nguyên ở raw và clean.
 
 known_anomalies:
   - date: 2024-11-15
